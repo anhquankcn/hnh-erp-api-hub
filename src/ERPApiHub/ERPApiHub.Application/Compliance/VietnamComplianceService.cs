@@ -126,11 +126,11 @@ public sealed class VietnamComplianceService
             if (!valid && error is not null) errors.Add($"InvoiceSymbol: {error}");
         }
 
-        // Invoice number format (6 digits)
+        // Invoice number format (6-8 digits)
         if (!string.IsNullOrWhiteSpace(invoice.InvoiceNumber))
         {
-            if (!Regex.IsMatch(invoice.InvoiceNumber, @"^\d{6}$"))
-                errors.Add("InvoiceNumber must be exactly 6 digits.");
+            if (!Regex.IsMatch(invoice.InvoiceNumber, @"^\d{6,8}$"))
+                errors.Add("InvoiceNumber must be 6-8 digits.");
         }
 
         // Currency code (VND default)

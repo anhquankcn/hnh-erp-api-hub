@@ -1,4 +1,5 @@
 using System.Text;
+using ERPApiHub.Application.Errors;
 using ERPApiHub.Domain.Entities;
 using ERPApiHub.Infrastructure.Data;
 using Microsoft.AspNetCore.DataProtection;
@@ -122,6 +123,12 @@ public sealed class ExternalSystemService
         int pageSize,
         CancellationToken ct)
     {
+        if (page <= 0)
+            throw new ArgumentException("Page must be greater than 0.", nameof(page));
+
+        if (pageSize <= 0 || pageSize > 100)
+            throw new ArgumentException("PageSize must be between 1 and 100.", nameof(pageSize));
+
         var query = _dbContext.ExternalSystems
             .Where(s => s.TenantId == tenantId && s.DeletedAt == null);
 
@@ -155,7 +162,7 @@ public sealed class ExternalSystemService
     {
         var system = await _dbContext.ExternalSystems
             .FirstOrDefaultAsync(s => s.SystemId == systemId && s.DeletedAt == null, ct)
-            ?? throw new InvalidOperationException($"External system '{systemId}' not found.");
+            ?? throw new NotFoundException($"External system '{systemId}' not found.");
 
         if (request.SystemName is not null) system.SystemName = request.SystemName;
         if (request.SystemType is not null) system.SystemType = request.SystemType;
@@ -186,7 +193,7 @@ public sealed class ExternalSystemService
     {
         var system = await _dbContext.ExternalSystems
             .FirstOrDefaultAsync(s => s.SystemId == systemId && s.DeletedAt == null, ct)
-            ?? throw new InvalidOperationException($"External system '{systemId}' not found.");
+            ?? throw new NotFoundException($"External system '{systemId}' not found.");
 
         var now = DateTime.UtcNow;
         system.IsActive = false;
@@ -219,7 +226,7 @@ public sealed class ExternalSystemService
     {
         var system = await _dbContext.ExternalSystems
             .FirstOrDefaultAsync(s => s.SystemId == systemId && s.DeletedAt == null, ct)
-            ?? throw new InvalidOperationException($"External system '{systemId}' not found.");
+            ?? throw new NotFoundException($"External system '{systemId}' not found.");
 
         // Deactivate old keys (immediate — grace period would need background job)
         var oldMappings = await _dbContext.ApiKeyMappings

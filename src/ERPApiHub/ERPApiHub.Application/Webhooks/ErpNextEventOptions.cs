@@ -16,4 +16,7 @@ public class ErpNextEventOptions
 
     /// <summary>Whether event ingestion endpoint is enabled.</summary>
     public bool Enabled { get; set; } = true;
+
+    /// <summary>Whether to explicitly skip signature validation for local testing.</summary>
+    public bool SkipSignatureValidation { get; set; } = false;
 }

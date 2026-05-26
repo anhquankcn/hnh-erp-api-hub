@@ -139,6 +139,19 @@ public class VietnamComplianceServiceTests
     }
 
     [Fact]
+    public void ValidateEInvoice_EightDigitInvoiceNumber_ReturnsNoInvoiceNumberError()
+    {
+        var invoice = new EInvoiceRequest
+        {
+            SellerTaxId = "0101182234",
+            InvoiceNumber = "00000123"
+        };
+
+        var (_, errors) = _service.ValidateEInvoice(invoice);
+        Assert.DoesNotContain(errors, e => e.Contains("InvoiceNumber"));
+    }
+
+    [Fact]
     public void ValidateEInvoice_InvalidInvoiceNumber_ReturnsError()
     {
         var invoice = new EInvoiceRequest

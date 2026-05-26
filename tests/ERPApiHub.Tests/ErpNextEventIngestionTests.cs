@@ -169,10 +169,17 @@ public class ErpNextEventIngestionTests
     }
 
     [Fact]
-    public void ValidateSignature_EmptySecret_SkipsValidation()
+    public void ValidateSignature_EmptySecret_ReturnsFalse()
     {
-        // When shared secret is empty, validation is skipped (returns true)
         var service = CreateService(sharedSecret: "");
+        var result = service.ValidateSignature("{}", "sha256=abc");
+        Assert.False(result);
+    }
+
+    [Fact]
+    public void ValidateSignature_EmptySecretWithExplicitSkip_ReturnsTrue()
+    {
+        var service = CreateService(sharedSecret: "", skipSignatureValidation: true);
         var result = service.ValidateSignature("{}", "sha256=abc");
         Assert.True(result);
     }
@@ -185,7 +192,9 @@ public class ErpNextEventIngestionTests
         Assert.False(result);
     }
 
-    private static ErpNextEventIngestionService CreateService(string sharedSecret = "test-secret")
+    private static ErpNextEventIngestionService CreateService(
+        string sharedSecret = "test-secret",
+        bool skipSignatureValidation = false)
     {
         var dbContext = Mock.Of<ERPApiHub.Infrastructure.Data.ErpHubDbContext>();
         var connectionFactory = Mock.Of<ERPApiHub.Infrastructure.Messaging.IRabbitMqConnectionFactory>();
@@ -197,7 +206,8 @@ public class ErpNextEventIngestionTests
         {
             SharedSecret = sharedSecret,
             MaxClockSkewSeconds = 300,
-            Enabled = true
+            Enabled = true,
+            SkipSignatureValidation = skipSignatureValidation
         };
         var logger = Mock.Of<Microsoft.Extensions.Logging.ILogger<ErpNextEventIngestionService>>();
 

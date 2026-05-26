@@ -21,6 +21,7 @@ public sealed class ErpNextEventIngestionService
     private readonly RabbitMqOptions _rabbitMqOptions;
     private readonly ErpNextEventOptions _eventOptions;
     private readonly ILogger<ErpNextEventIngestionService> _logger;
+    private IConnection? _connection;
 
     public ErpNextEventIngestionService(
         ErpHubDbContext dbContext,
@@ -43,8 +44,16 @@ public sealed class ErpNextEventIngestionService
     {
         if (string.IsNullOrWhiteSpace(_eventOptions.SharedSecret))
         {
-            _logger.LogWarning("ERPNext event shared secret not configured. Skipping signature validation.");
-            return true;
+            _logger.LogCritical("ERPNext event shared secret not configured! Signature validation is DISABLED.");
+
+            if (_eventOptions.SkipSignatureValidation)
+            {
+                _logger.LogWarning(
+                    "Signature validation explicitly skipped (SkipSignatureValidation=true). DO NOT use in production.");
+                return true;
+            }
+
+            return false;
         }
 
         // Expected format: "sha256={hex_digest}"
@@ -133,8 +142,8 @@ public sealed class ErpNextEventIngestionService
             eventId, eventType, source);
 
         // Publish to RabbitMQ
-        var connection = await _connectionFactory.CreateConnectionAsync(ct);
-        var channel = await connection.CreateChannelAsync(cancellationToken: ct);
+        var connection = await GetConnectionAsync(ct);
+        await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
 
         await channel.ExchangeDeclareAsync(
             exchange: _rabbitMqOptions.ExchangeName,
@@ -195,5 +204,15 @@ public sealed class ErpNextEventIngestionService
         _logger.LogInformation(
             "Event {EventId} published to {Exchange} with routing key {RoutingKey}",
             eventId, _rabbitMqOptions.ExchangeName, routingKey);
+    }
+
+    private async Task<IConnection> GetConnectionAsync(CancellationToken ct)
+    {
+        if (_connection is null || !_connection.IsOpen)
+        {
+            _connection = await _connectionFactory.CreateConnectionAsync(ct);
+        }
+
+        return _connection;
     }
 }

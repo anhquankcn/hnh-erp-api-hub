@@ -60,12 +60,19 @@ public sealed class ProblemDetailsMiddleware
                     requestId),
                 StatusCodes.Status401Unauthorized),
 
-            InvalidOperationException when exception.Message.Contains("not found", StringComparison.OrdinalIgnoreCase) => (
+            NotFoundException => (
                 ProblemDetailsHelper.NotFound(
                     exception.Message,
                     path,
                     requestId),
                 StatusCodes.Status404NotFound),
+
+            ForbiddenException => (
+                ProblemDetailsHelper.Forbidden(
+                    exception.Message,
+                    path,
+                    requestId),
+                StatusCodes.Status403Forbidden),
 
             InvalidOperationException => (
                 ProblemDetailsHelper.Forbidden(
