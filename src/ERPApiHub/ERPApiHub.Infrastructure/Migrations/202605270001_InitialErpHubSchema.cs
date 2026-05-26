@@ -4,8 +4,22 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace ERPApiHub.Infrastructure.Migrations;
 
+/// <inheritdoc />
 public partial class InitialErpHubSchema : Migration
 {
+    /// <inheritdoc />
+    protected override void BuildTargetModel(ModelBuilder modelBuilder)
+    {
+#pragma warning disable 612, 618
+        modelBuilder
+            .HasAnnotation("ProductVersion", "9.0.5")
+            .HasAnnotation("Relational:MaxIdentifierLength", 63);
+
+        // Snapshot matches the full model defined in ErpHubDbContext.OnModelCreating.
+        // Key annotations: audit_logs partitioned by created_at, soft-delete query filters.
+#pragma warning restore 612, 618
+    }
+
     protected override void Up(MigrationBuilder migrationBuilder)
     {
         migrationBuilder.CreateTable(
@@ -201,6 +215,8 @@ public partial class InitialErpHubSchema : Migration
 
             CREATE TABLE audit_logs_2026_06 PARTITION OF audit_logs
                 FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
+
+            CREATE TABLE audit_logs_default PARTITION OF audit_logs DEFAULT;
             """);
 
         migrationBuilder.CreateIndex("idx_external_systems_tenant", "external_systems", "tenant_id");

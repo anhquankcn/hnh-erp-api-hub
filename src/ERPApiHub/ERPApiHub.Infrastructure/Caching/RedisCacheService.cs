@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
@@ -62,6 +63,8 @@ public sealed class RedisCacheService : IRedisCacheService
         await _database.KeyDeleteAsync(BuildKey(key));
     }
 
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> _keyLocks = new();
+
     public async Task<T> GetOrCreateAsync<T>(
         string key,
         Func<CancellationToken, Task<T>> factory,
@@ -74,10 +77,32 @@ public sealed class RedisCacheService : IRedisCacheService
             return cachedValue;
         }
 
-        var createdValue = await factory(cancellationToken);
-        await SetAsync(key, createdValue, ttl, cancellationToken);
+        // Stampede protection: per-key lock ensures only one caller populates the cache
+        var keyLock = _keyLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await keyLock.WaitAsync(cancellationToken);
+        try
+        {
+            // Double-check after acquiring lock
+            cachedValue = await GetAsync<T>(key, cancellationToken);
+            if (cachedValue is not null)
+            {
+                return cachedValue;
+            }
 
-        return createdValue;
+            var createdValue = await factory(cancellationToken);
+            await SetAsync(key, createdValue, ttl, cancellationToken);
+
+            return createdValue;
+        }
+        finally
+        {
+            keyLock.Release();
+            // Clean up unused locks to avoid unbounded growth
+            if (_keyLocks.TryGetValue(key, out var existing) && existing == keyLock && existing.CurrentCount > 0)
+            {
+                _keyLocks.TryRemove(key, out _);
+            }
+        }
     }
 
     private RedisKey BuildKey(string key)

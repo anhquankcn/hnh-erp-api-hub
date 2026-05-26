@@ -151,26 +151,21 @@ public sealed class ErpIngestionConsumer(
         var dbContext = scope.ServiceProvider.GetRequiredService<ErpHubDbContext>();
         var erpNextClient = scope.ServiceProvider.GetRequiredService<IErpNextClient>();
 
-        var alreadyProcessed = await dbContext.ErpProcessedEvents
-            .AnyAsync(x => x.ErpProcessedEventId == envelope.EventId, cancellationToken);
+        // Atomic idempotency: insert dedup row first (INSERT ... ON CONFLICT DO NOTHING),
+        // then process. This eliminates the race between concurrent consumers.
+        var inserted = await dbContext.Database.ExecuteSqlRawAsync(
+            """INSERT INTO erp_processed_events (erp_processed_event_id, source, event_type, processed_at)
+               VALUES ({0}, {1}, {2}, NOW())
+               ON CONFLICT (erp_processed_event_id) DO NOTHING""",
+            envelope.EventId, envelope.Source, envelope.EventType, cancellationToken);
 
-        if (alreadyProcessed)
+        if (inserted == 0)
         {
             logger.LogInformation("Skipping duplicate ERP ingestion event {EventId}", envelope.EventId);
             return;
         }
 
         await erpNextClient.PushEventAsync(envelope, cancellationToken);
-
-        dbContext.ErpProcessedEvents.Add(new ErpProcessedEvent
-        {
-            ErpProcessedEventId = envelope.EventId,
-            Source = envelope.Source,
-            EventType = envelope.EventType,
-            ProcessedAt = DateTimeOffset.UtcNow
-        });
-
-        await dbContext.SaveChangesAsync(cancellationToken);
     }
 
     private static ErpEventEnvelope DeserializeEnvelope(ReadOnlySpan<byte> body)
