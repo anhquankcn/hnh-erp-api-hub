@@ -4,8 +4,15 @@ namespace ERPApiHub.Application.Abstractions;
 
 public interface IErpNextClient
 {
-    Task PushEventAsync(ErpEventEnvelope envelope, CancellationToken cancellationToken);
+    Task<ErpNextResponse<T>> GetAsync<T>(string resourcePath, CancellationToken cancellationToken);
+
+    Task<ErpNextResponse<T>> PostAsync<T>(string resourcePath, object payload, CancellationToken cancellationToken);
 }
+
+public sealed record ErpNextResponse<T>(
+    T? Data,
+    int StatusCode,
+    string? Message);
 
 public sealed record ErpEventEnvelope(
     string EventId,

@@ -1,7 +1,7 @@
 using ERPApiHub.Infrastructure.Messaging;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
-namespace ERPApiHub.Worker.Health;
+namespace ERPApiHub.Infrastructure.Health;
 
 public sealed class RabbitMqHealthCheck(IRabbitMqConnectionFactory connectionFactory) : IHealthCheck
 {

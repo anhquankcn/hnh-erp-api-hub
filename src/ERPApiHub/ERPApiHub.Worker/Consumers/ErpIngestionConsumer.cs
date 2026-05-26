@@ -160,7 +160,7 @@ public sealed class ErpIngestionConsumer(
             return;
         }
 
-        await erpNextClient.PushEventAsync(envelope, cancellationToken);
+        await erpNextClient.PostAsync<object>("events/ingestion", envelope, cancellationToken);
 
         dbContext.ErpProcessedEvents.Add(new ErpProcessedEvent
         {
