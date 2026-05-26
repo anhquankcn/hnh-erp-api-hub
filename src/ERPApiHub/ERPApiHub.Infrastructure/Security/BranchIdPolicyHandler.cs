@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Options;
 
 namespace ERPApiHub.Infrastructure.Security;
 
@@ -7,7 +8,9 @@ public sealed class BranchIdRequirement : IAuthorizationRequirement
 {
 }
 
-public sealed class BranchIdPolicyHandler(IHttpContextAccessor httpContextAccessor)
+public sealed class BranchIdPolicyHandler(
+    IHttpContextAccessor httpContextAccessor,
+    IOptions<KeycloakOptions> keycloakOptions)
     : AuthorizationHandler<BranchIdRequirement>
 {
     public const string PolicyName = "BranchId";
@@ -23,9 +26,12 @@ public sealed class BranchIdPolicyHandler(IHttpContextAccessor httpContextAccess
         if (!string.IsNullOrWhiteSpace(branchId))
         {
             httpContextAccessor.HttpContext?.Items.TryAdd(HttpContextItemKey, branchId);
+            context.Succeed(requirement);
+            return Task.CompletedTask;
         }
 
-        if (context.User.Identity?.IsAuthenticated == true)
+        if (!keycloakOptions.Value.RequireBranchIdClaim &&
+            context.User.Identity?.IsAuthenticated == true)
         {
             context.Succeed(requirement);
         }

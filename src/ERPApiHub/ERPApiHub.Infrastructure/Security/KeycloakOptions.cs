@@ -15,4 +15,6 @@ public sealed class KeycloakOptions
     public string Audience { get; set; } = DefaultAudience;
 
     public bool RequireHttpsMetadata { get; set; } = true;
+
+    public bool RequireBranchIdClaim { get; set; }
 }

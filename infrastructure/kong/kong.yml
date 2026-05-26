@@ -27,13 +27,8 @@ services:
         regex_priority: 1
 
 plugins:
-  - name: jwt
-    config:
-      uri_param_names:
-        - jwt
-      claims_to_verify:
-        - exp
-
+  # Authentication is validated downstream by YARP Gateway and the API via
+  # OIDC discovery. Kong should not enforce JWT credentials globally.
   - name: rate-limiting
     config:
       minute: 1000
