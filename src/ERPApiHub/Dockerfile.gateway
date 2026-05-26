@@ -13,10 +13,10 @@ COPY tests/ERPApiHub.Tests/ERPApiHub.Tests.csproj tests/ERPApiHub.Tests/
 RUN dotnet restore ERPApiHub.sln
 
 COPY . .
-RUN dotnet publish src/ERPApiHub/ERPApiHub.API/ERPApiHub.API.csproj -c Release -o /app/publish --no-restore
+RUN dotnet publish src/ERPApiHub/ERPApiHub.Gateway/ERPApiHub.Gateway.csproj -c Release -o /app/publish --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app
 COPY --from=build /app/publish .
-EXPOSE 8008
-ENTRYPOINT ["dotnet", "ERPApiHub.API.dll"]
+EXPOSE 8888
+ENTRYPOINT ["dotnet", "ERPApiHub.Gateway.dll"]

@@ -1,0 +1,67 @@
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: erp-api-hub
+    url: http://erp-api-hub:8008/
+    path: /
+    retries: 3
+    connect_timeout: 5000
+    read_timeout: 30000
+    routes:
+      - name: erp-api-hub-v1
+        paths:
+          - /api/v1
+        strip_path: true
+        regex_priority: 0
+
+  - name: erp-gateway
+    url: http://erp-gateway:8888/
+    path: /
+    retries: 3
+    routes:
+      - name: erp-gateway-internal
+        paths:
+          - /internal
+        strip_path: true
+        regex_priority: 1
+
+plugins:
+  - name: jwt
+    config:
+      uri_param_names:
+        - jwt
+      claims_to_verify:
+        - exp
+
+  - name: rate-limiting
+    config:
+      minute: 1000
+      policy: local
+
+  - name: request-transformer
+    config:
+      add:
+        headers:
+          - X-Gateway:Kong
+
+  - name: correlation-id
+    config:
+      header_name: X-Correlation-ID
+      generator: uuid#counter
+
+  - name: cors
+    config:
+      origins:
+        - https://*.hnhtravel.work
+        - http://localhost:3000
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - PATCH
+      headers:
+        - Authorization
+        - X-Branch-Id
+        - Content-Type
