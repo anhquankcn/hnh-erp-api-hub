@@ -29,6 +29,8 @@
 ### 1.1 Purpose
 TDD này mô tả chi tiết kỹ thuật để implement ERP API Hub dựa trên FRD v1.2 và Platform Reference Architecture (PLAT-001).
 
+**Core Paradigm:** ERPNext là **Core Master Data** — single source of truth. Mọi hệ thống nghiệp vụ push data vào ERP qua API Hub, và pull data từ ERP (thông qua API Hub) khi cần truy vấn data từ hệ thống khác.
+
 ### 1.2 Scope
 - Database schema (PostgreSQL 18)
 - API contracts (REST + OpenAPI)
@@ -762,7 +764,7 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 
 ## 9. Integration Patterns
 
-### 9.1 Auth Pattern (A)
+### 9.1 Auth Pattern (A) — Public (via Kong)
 
 ```
 External System → Kong (:8000)
@@ -778,6 +780,42 @@ External System → Kong (:8000)
                       │
                       ▼
               ERPNext REST API (/api/resource/{Doctype})
+```
+
+### 9.1b Auth Pattern (A) — Internal (via YARP)
+
+```
+1StopShop Service → YARP (:8888)
+                      │
+                      ▼
+              JWT Validation (YARP + Keycloak RS256)
+                      │
+                      ▼
+              Inject Headers (X-User-Id, X-Branch-Id, X-Role)
+                      │
+                      ▼
+              API Hub (map to ERPNext API Key)
+                      │
+                      ▼
+              ERPNext REST API (/api/resource/{Doctype})
+```
+
+### 9.1c Core Master Data Flow
+
+```
+┌─────────────┐     Push (Ingestion)      ┌──────────────┐     ┌─────────────┐
+│  CRM System  │ ──────────────────────▶ │  ERP API Hub │ ──▶ │  ERPNext     │
+│  (Customer)  │                         │  (Kong/YARP) │     │  (Master Data│
+└─────────────┘                          └──────┬───────┘     │  Storage)   │
+                                                  │              └──────┬──────┘
+┌─────────────┐     Pull (Query)                   │                     │
+│  Ticketing   │ ◀─────────────────────────────── │                     │
+│  System      │ ◀── gets customer data ──────── │                     │
+└─────────────┘    originated from CRM             │                     │
+                                                  ▼                     │
+                                         Push = ERP là SSoT             │
+                                         Pull = Truy vấn data           │
+                                            từ hệ khác                   │
 ```
 
 ### 9.2 Event Pattern (B)

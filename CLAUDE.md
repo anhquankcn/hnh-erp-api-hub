@@ -7,19 +7,34 @@
 
 ## 1. Project Overview
 
-**ERP API Hub** — cổng kết nối giữa hệ sinh thái HNH Travel (1StopShop) và ERPNext (Frappe v15).
+**ERP API Hub** — cổng kết nối giữa hệ sinh thái HNH Travel (1StopShop) và **ERPNext (Core Master Data)**.
+
+**Core Paradigm:** ERPNext là **Core Master Data** — single source of truth:
+- **Inbound (Push):** Các hệ thống nghiệp vụ đẩy dữ liệu phát sinh vào ERP → ERP lưu trữ
+- **Outbound (Pull):** Các hệ thống nghiệp vụ truy vấn ERP → lấy data từ hệ thống khác
+- Ví dụ: CRM push customer → ERP → Ticketing pull customer từ ERP
 
 - **Vai trò:** Service riêng, chạy song song với các microservice hiện có
 - **Port:** 8008 (API Hub), 8009 (Worker)
 - **Public Gateway:** Kong 3.x (DB-less) trên port 8000 — cho ERP API Hub
 - **Internal Gateway:** YARP (.NET 9) trên port 8888 — cho hệ 1StopShop
-- **ERP Backend:** ERPNext v15
+- **ERP Backend:** ERPNext v15 — **Core Master Data**
 
-### Chiều tích hợp
+### Chiều tích hợp (Core Master Data Paradigm)
 
-1. **Inbound (Ingestion):** External system → **Kong** → API Hub → ERPNext (ghi dữ liệu)
-2. **Outbound (Query):** External system → **Kong** → API Hub ← ERPNext (đọc dữ liệu)
-3. **Internal:** 1StopShop → **YARP** → API Hub → ERPNext
+**ERPNext là Core Master Data — single source of truth:**
+
+1. **Inbound (Push):** Hệ nghiệp vụ → **Kong** → API Hub → ERPNext → ERP lưu trữ master data
+2. **Outbound (Pull):** Hệ nghiệp vụ → **Kong** → API Hub ← ERPNext → Truy vấn data từ hệ khác
+3. **Internal:** 1StopShop → **YARP** → API Hub → ERPNext (push/pull như trên)
+4. **Event (RabbitMQ):** 1StopShop publish event → API Hub consume → push vào ERPNext
+5. **Webhook (Outbound):** ERPNext event → API Hub → external systems
+
+**Ví dụ:**
+- CRM push customer data → ERPNext (inbound)
+- Ticketing pull customer data ← ERPNext (outbound — data gốc từ CRM)
+- Payment push payment confirmation → ERPNext (inbound)
+- Accounting pull payment data ← ERPNext (outbound — data gốc từ Payment)
 3. **Event (RabbitMQ):** 1StopShop services publish event → API Hub consume → ghi vào ERPNext
 4. **Webhook (Outbound):** ERPNext event → API Hub → external systems
 
@@ -302,6 +317,8 @@ Bắt buộc:
 8. **Đừng cache PII** — Trừ khi đã mask theo role-based masking rules.
 9. **Đừng retry 4xx** — Chỉ retry 5xx/timeout với exponential backoff.
 10. **Timestamp UTC+7** — Mọi cross-system compare phải normalize.
+11. **ERPNext là Core Master Data** — Mọi dữ liệu nghiệp vụ phải push vào ERP. Không lưu duplicate ở API Hub. API Hub chỉ cache, không phải source of truth.
+12. **Push before Pull** — Hệ thống phải push data vào ERP trước khi hệ khác có thể pull được.
 
 ---
 

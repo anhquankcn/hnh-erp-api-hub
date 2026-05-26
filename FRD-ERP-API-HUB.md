@@ -34,25 +34,34 @@
 ## 1. Introduction
 
 ### 1.1 Purpose
-This FRD defines the functional requirements for the ERP API Hub — a standalone integration service that acts as a gateway between external systems and the ERPNext v15 ERP core of HNH Travel.
+This FRD defines the functional requirements for the ERP API Hub — a standalone integration service that acts as the **sole gateway** between HNH Travel's business systems and the **ERPNext v15 Core Master Data** system.
+
+**Core Paradigm:** ERPNext operates as the **Core Master Data** hub of HNH Travel:
+- **Inbound (Push):** Business systems push transactional/master data into ERP via API Hub → ERP stores as single source of truth
+- **Outbound (Pull):** Business systems query ERP via API Hub → retrieve data originated from other systems
+- This means: CRM data, ticketing data, payment data — all flow **into** ERP for consolidation, and can be **queried back** by any authorized system
 
 ### 1.2 Scope
 The ERP API Hub provides:
-- **Inbound data ingestion** from external systems to ERPNext
-- **Outbound data queries** from external systems to ERPNext
-- **Event-driven webhooks** from ERPNext to external systems
+- **Inbound data ingestion (Push):** Business systems push data → API Hub → ERP stores as Core Master Data
+- **Outbound data queries (Pull):** Business systems query → API Hub → ERP returns consolidated data from other systems
+- **Event-driven webhooks:** ERP notifies external systems of data changes
 - **Cross-cutting concerns**: authentication, rate limiting, audit logging, retry mechanisms
 
 ### 1.3 Definitions
 
 | Term | Definition |
 |------|-----------|
+| Term | Definition |
+|------|-----------|
 | API Hub | The standalone integration service described in this document |
+| Core Master Data | ERPNext as the single source of truth — all business systems push data into ERP, and query data from other systems via ERP |
 | Doctype | ERPNext's document type system (equivalent to database tables) |
 | ERPNext | The open-source ERP system (v15) powering HNH Travel |
-| External System | Any third-party system connecting to the API Hub |
+| External System | Any business system (CRM, Ticketing, Payment, etc.) connecting to the API Hub |
 | Frappe | The Python web framework underlying ERPNext |
-| Ingestion | Process of receiving and storing external data into ERP |
+| Ingestion (Push) | Process of pushing transactional/master data from business systems into ERP for storage as Core Master Data |
+| Query (Pull) | Process of retrieving consolidated data from ERP — data that may have originated from other business systems |
 | Idempotency Key | Unique identifier preventing duplicate processing |
 | Tenant | A business branch/site within the multi-tenant ERP |
 

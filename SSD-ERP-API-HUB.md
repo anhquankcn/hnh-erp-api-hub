@@ -24,10 +24,16 @@
 
 ### 1.1 System Context
 
-ERP API Hub là service riêng biệt, chạy song song với các microservice hiện có trong hệ sinh thái HNH Travel. Service đóng vai trò cầu nối giữa:
+ERP API Hub là service riêng biệt, chạy song song với các microservice hiện có trong hệ sinh thái HNH Travel.
 
+**Core Paradigm — ERPNext là Core Master Data:**
+- **Inbound (Push):** Các hệ thống nghiệp vụ (CRM, Ticketing, Payment...) đẩy dữ liệu phát sinh vào ERP qua API Hub → ERP lưu trữ làm single source of truth
+- **Outbound (Pull):** Các hệ thống nghiệp vụ truy vấn ERP qua API Hub → lấy dữ liệu mà hệ thống khác đã đẩy vào ERP
+- Ví dụ: CRM đẩy customer data vào ERP → Ticketing truy vấn customer data từ ERP (thông qua API Hub)
+
+Service đóng vai trò cầu nối giữa:
 - **Hệ 1StopShop** (Core, CRM, Ticketing, Quotation, Payment) — .NET 9, YARP Gateway
-- **ERPNext** (Frappe v15) — hệ ERP kế toán, kho, mua hàng
+- **ERPNext** (Frappe v15) — **Core Master Data**, hệ ERP kế toán, kho, mua hàng
 
 ### 1.2 System Boundaries
 
