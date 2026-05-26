@@ -4,6 +4,7 @@ using ERPApiHub.Application.Compliance;
 using ERPApiHub.Application.Configuration;
 using ERPApiHub.Application.Errors;
 using ERPApiHub.Application.Ingestion;
+using ERPApiHub.Application.Observability;
 using ERPApiHub.Application.Query;
 using ERPApiHub.Application.RateLimiting;
 using ERPApiHub.Application.Webhooks;
@@ -58,6 +59,12 @@ builder.Services.AddScoped<ErpNextEventIngestionService>();
 // S3-006: Vietnam Compliance
 builder.Services.AddSingleton<VietnamComplianceService>();
 
+// S3-005: Observability
+if (builder.Configuration.GetValue<bool>("OpenTelemetry:Enabled"))
+{
+    builder.Services.AddErpHubObservability(builder.Configuration);
+}
+
 // Authorization policies
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy("api-hub:write", policy =>
@@ -79,6 +86,9 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
     app.UseCors("InternalGateway");
 }
+
+// S3-005: Request logging
+app.UseMiddleware<RequestLoggingMiddleware>();
 
 // S3-004: Global exception handler (RFC 7807)
 app.UseMiddleware<ProblemDetailsMiddleware>();
