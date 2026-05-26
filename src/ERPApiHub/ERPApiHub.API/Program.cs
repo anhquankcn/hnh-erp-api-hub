@@ -1,7 +1,9 @@
 using System.Text.Json;
 using ERPApiHub.Application.Audit;
+using ERPApiHub.Application.Errors;
 using ERPApiHub.Application.Ingestion;
 using ERPApiHub.Application.Query;
+using ERPApiHub.Application.RateLimiting;
 using ERPApiHub.Application.Webhooks;
 using ERPApiHub.Infrastructure;
 using ERPApiHub.Infrastructure.Caching;
@@ -40,6 +42,10 @@ builder.Services.AddScoped<WebhookSubscriptionService>();
 builder.Services.AddScoped<WebhookDeliveryService>();
 builder.Services.AddHttpClient("WebhookDelivery");
 
+// S3-001: Rate Limiting
+builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(RateLimitOptions.SectionName));
+builder.Services.AddScoped<RateLimitService>();
+
 // Authorization policies
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy("api-hub:write", policy =>
@@ -61,6 +67,12 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
     app.UseCors("InternalGateway");
 }
+
+// S3-004: Global exception handler (RFC 7807)
+app.UseMiddleware<ProblemDetailsMiddleware>();
+
+// S3-001: Rate limiting middleware (before auth so headers are set)
+app.UseMiddleware<RateLimitMiddleware>();
 
 app.UseAuthentication();
 app.UseAuthorization();
