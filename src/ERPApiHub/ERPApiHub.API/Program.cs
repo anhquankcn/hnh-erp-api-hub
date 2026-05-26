@@ -1,7 +1,12 @@
 using System.Text.Json;
+using ERPApiHub.Application.Audit;
 using ERPApiHub.Application.Ingestion;
+using ERPApiHub.Application.Query;
+using ERPApiHub.Application.Webhooks;
 using ERPApiHub.Infrastructure;
+using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
+using ERPApiHub.Infrastructure.ErpNext;
 using ERPApiHub.Infrastructure.Health;
 using ERPApiHub.Infrastructure.Security;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -27,6 +32,13 @@ builder.Services.AddKeycloakJwtAuthentication(builder.Configuration, builder.Env
 // Application layer services
 builder.Services.AddSingleton<AllowedDoctypeValidator>();
 builder.Services.AddScoped<IngestionService>();
+builder.Services.AddScoped<QueryService>();
+builder.Services.AddScoped<AuditService>();
+builder.Services.AddSingleton<PiiMaskingService>();
+builder.Services.AddScoped<WebhookSignatureService>();
+builder.Services.AddScoped<WebhookSubscriptionService>();
+builder.Services.AddScoped<WebhookDeliveryService>();
+builder.Services.AddHttpClient("WebhookDelivery");
 
 // Authorization policies
 builder.Services.AddAuthorizationBuilder()
@@ -69,7 +81,7 @@ app.MapPost("/api/v1/ingest/{doctype}", async (string doctype, IngestionRequest 
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
 }).RequireAuthorization("api-hub:write");
 
-app.MapPut("/api/v1/ingest/{doctype}/{name}", async (string doctype, string name, System.Text.Json.JsonElement payload, IngestionService service, HttpContext ctx, CancellationToken ct) =>
+app.MapPut("/api/v1/ingest/{doctype}/{name}", async (string doctype, string name, JsonElement payload, IngestionService service, HttpContext ctx, CancellationToken ct) =>
 {
     var idempotencyKey = ctx.Request.Headers["X-Idempotency-Key"].FirstOrDefault();
     var response = await service.UpdateAsync(doctype, name, payload, idempotencyKey, ct);
@@ -91,7 +103,7 @@ app.MapPost("/api/v1/ingest/batch", async (List<IngestionRequest> operations, In
 
 // ─── Ingestion Status & DLQ (S2-003) ───
 
-app.MapGet("/api/v1/ingest/status/{jobId}", async (string jobId, ERPApiHub.Infrastructure.Caching.IRedisCacheService cache, CancellationToken ct) =>
+app.MapGet("/api/v1/ingest/status/{jobId}", async (string jobId, IRedisCacheService cache, CancellationToken ct) =>
 {
     var status = await cache.GetAsync<object>($"job:{jobId}", ct);
     return status is null ? Results.NotFound(new { error = "Job not found" }) : Results.Ok(status);
@@ -99,14 +111,102 @@ app.MapGet("/api/v1/ingest/status/{jobId}", async (string jobId, ERPApiHub.Infra
 
 app.MapGet("/api/v1/ingest/dlq", () =>
 {
-    // DLQ listing requires RabbitMQ Management API — placeholder
     return Results.Ok(new { message = "DLQ listing requires RabbitMQ Management API integration", items = Array.Empty<object>() });
 }).RequireAuthorization("api-hub:admin");
 
 app.MapPost("/api/v1/ingest/dlq/{id}/replay", (string id) =>
 {
-    // DLQ replay — placeholder
     return Results.Accepted(null, new { message = $"Replay requested for DLQ message {id}" });
+}).RequireAuthorization("api-hub:admin");
+
+// ─── Query Endpoints (S2-004) ───
+
+app.MapGet("/api/v1/query/{doctype}", async (string doctype, int? page, int? pageSize, string? filters, string? orderBy, string? fields, QueryService queryService, CancellationToken ct) =>
+{
+    var request = new QueryRequest
+    {
+        Doctype = doctype,
+        Page = page ?? 1,
+        PageSize = Math.Min(pageSize ?? 20, 100),
+        Filters = filters,
+        OrderBy = orderBy,
+        Fields = fields
+    };
+
+    var response = await queryService.ListAsync(request, ct);
+    return Results.Ok(response);
+}).RequireAuthorization("api-hub:read");
+
+app.MapGet("/api/v1/query/{doctype}/{name}", async (string doctype, string name, QueryService queryService, CancellationToken ct) =>
+{
+    var result = await queryService.GetAsync(doctype, name, ct);
+    return Results.Ok(result);
+}).RequireAuthorization("api-hub:read");
+
+app.MapGet("/api/v1/query/{doctype}/count", async (string doctype, QueryService queryService, CancellationToken ct) =>
+{
+    var result = await queryService.CountAsync(doctype, ct);
+    return Results.Ok(result);
+}).RequireAuthorization("api-hub:read");
+
+app.MapDelete("/api/v1/cache/{doctype}", async (string doctype, QueryService queryService, CancellationToken ct) =>
+{
+    await queryService.PurgeCacheAsync(doctype, ct);
+    return Results.Ok(new { message = $"Cache purged for {doctype}" });
+}).RequireAuthorization("api-hub:admin");
+
+// ─── Audit Endpoints (S2-007) ───
+
+app.MapGet("/api/v1/audit/logs", async (string? tenantId, string? userId, string? endpoint, int? statusCode, string? fromDate, string? toDate, int? page, int? pageSize, AuditService auditService, CancellationToken ct) =>
+{
+    DateTimeOffset? from = fromDate is not null ? DateTimeOffset.Parse(fromDate) : null;
+    DateTimeOffset? to = toDate is not null ? DateTimeOffset.Parse(toDate) : null;
+
+    var result = await auditService.QueryLogsAsync(tenantId, userId, endpoint, statusCode, from, to, page ?? 1, pageSize ?? 20, ct);
+    return Results.Ok(result);
+}).RequireAuthorization("api-hub:admin");
+
+app.MapGet("/api/v1/audit/logs/export", async (string? tenantId, string? fromDate, string? toDate, AuditService auditService, CancellationToken ct) =>
+{
+    DateTimeOffset? from = fromDate is not null ? DateTimeOffset.Parse(fromDate) : null;
+    DateTimeOffset? to = toDate is not null ? DateTimeOffset.Parse(toDate) : null;
+
+    var csv = await auditService.ExportLogsAsCsvAsync(tenantId, from, to, ct);
+    return Results.Text(csv, "text/csv", Encoding.UTF8);
+}).RequireAuthorization("api-hub:admin");
+
+// ─── Webhook Endpoints (S2-006) ───
+
+app.MapPost("/api/v1/webhooks/subscriptions", async (CreateWebhookSubscriptionRequest req, WebhookSubscriptionService service, HttpContext ctx, CancellationToken ct) =>
+{
+    var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
+    var sub = await service.CreateAsync(req.SystemId, req.EventTypes, req.WebhookUrl, req.Secret, tenantId, ct);
+    return Results.Created($"/api/v1/webhooks/subscriptions/{sub.SubscriptionId}", sub);
+}).RequireAuthorization("api-hub:admin");
+
+app.MapGet("/api/v1/webhooks/subscriptions", async (WebhookSubscriptionService service, HttpContext ctx, CancellationToken ct) =>
+{
+    var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
+    var subs = await service.ListByTenantAsync(tenantId, ct);
+    return Results.Ok(subs);
+}).RequireAuthorization("api-hub:admin");
+
+app.MapPut("/api/v1/webhooks/subscriptions/{id}", async (string id, UpdateWebhookSubscriptionRequest req, WebhookSubscriptionService service, CancellationToken ct) =>
+{
+    var sub = await service.UpdateAsync(id, req.EventTypes, req.WebhookUrl, req.Secret, ct);
+    return Results.Ok(sub);
+}).RequireAuthorization("api-hub:admin");
+
+app.MapDelete("/api/v1/webhooks/subscriptions/{id}", async (string id, WebhookSubscriptionService service, CancellationToken ct) =>
+{
+    await service.DeleteAsync(id, ct);
+    return Results.NoContent();
+}).RequireAuthorization("api-hub:admin");
+
+app.MapGet("/api/v1/webhooks/deliveries/{subscriptionId}", async (string subscriptionId, WebhookDeliveryService service, CancellationToken ct) =>
+{
+    var deliveries = await service.ListDeliveriesAsync(subscriptionId, ct);
+    return Results.Ok(deliveries);
 }).RequireAuthorization("api-hub:admin");
 
 // ─── Health Checks ───
@@ -133,6 +233,23 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 }).AllowAnonymous();
 
 app.Run();
+
+// ─── Webhook Request DTOs ───
+
+public sealed record CreateWebhookSubscriptionRequest
+{
+    public string SystemId { get; init; } = string.Empty;
+    public string[] EventTypes { get; init; } = [];
+    public string WebhookUrl { get; init; } = string.Empty;
+    public string? Secret { get; init; }
+}
+
+public sealed record UpdateWebhookSubscriptionRequest
+{
+    public string[]? EventTypes { get; init; }
+    public string? WebhookUrl { get; init; }
+    public string? Secret { get; init; }
+}
 
 static Task WriteHealthCheckResponseAsync(HttpContext context, HealthReport report)
 {

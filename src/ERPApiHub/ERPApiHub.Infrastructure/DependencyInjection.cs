@@ -6,7 +6,8 @@ using ERPApiHub.Infrastructure.Messaging;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Polly.Extensions.Http;
+using Microsoft.Extensions.Http.Resilience;
+using Polly;
 using StackExchange.Redis;
 
 namespace ERPApiHub.Infrastructure;
@@ -29,31 +30,24 @@ public static class DependencyInjection
         services.AddScoped<IRedisCacheService, RedisCacheService>();
 
         // ERPNext HTTP Client with Polly retry
+        var erpNextOptions = configuration.GetSection(ErpNextOptions.SectionName).Get<ErpNextOptions>() ?? new();
         services.AddHttpClient<IErpNextClient, ErpNextHttpClient>(client =>
         {
-            var opts = configuration.GetSection(ErpNextOptions.SectionName).Get<ErpNextOptions>() ?? new();
-            client.Timeout = opts.Timeout;
+            client.Timeout = TimeSpan.FromSeconds(erpNextOptions.TimeoutSeconds);
         })
-        .AddPolicyHandler((serviceProvider, request) =>
+        .AddResilienceHandler("erpnext-retry", builder =>
         {
-            var opts = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ErpNextOptions>>().Value;
-            return Policy
-                .HandleResult<HttpResponseMessage>(response => (int)response.StatusCode >= 500)
-                .Or<HttpRequestException>()
-                .Or<TimeoutException>()
-                .WaitAndRetryAsync(
-                    opts.RetryCount,
-                    retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                    onRetry: (outcome, delay, retryCount, context) =>
-                    {
-                        var logger = serviceProvider.GetService<Microsoft.Extensions.Logging.ILogger<ErpNextHttpClient>>();
-                        logger?.LogWarning(
-                            "ERPNext request failed with {StatusCode}. Retrying in {RetryDelay}s... ({RetryCount}/{MaxRetries})",
-                            outcome.Result?.StatusCode ?? 0,
-                            delay.TotalSeconds,
-                            retryCount,
-                            opts.RetryCount);
-                    });
+            builder.AddRetry(new HttpRetryStrategyOptions
+            {
+                MaxRetryAttempts = erpNextOptions.RetryCount,
+                BackoffType = DelayBackoffType.Exponential,
+                UseJitter = true,
+                ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
+                    .HandleResult(response => (int)response.StatusCode >= 500)
+                    .Handle<HttpRequestException>()
+                    .Handle<TimeoutException>(),
+                Delay = TimeSpan.FromSeconds(2),
+            });
         });
 
         services.AddDataProtection();
