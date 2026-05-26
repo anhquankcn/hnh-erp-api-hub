@@ -1,5 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
+    <PackageReference Include="NetUlid" Version="2.1.0" />
+    <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\ERPApiHub.Domain\ERPApiHub.Domain.csproj" />
   </ItemGroup>
 </Project>
