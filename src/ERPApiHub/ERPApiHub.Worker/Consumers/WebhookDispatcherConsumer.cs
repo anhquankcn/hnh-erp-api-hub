@@ -23,7 +23,6 @@ namespace ERPApiHub.Worker.Consumers;
 /// </summary>
 public sealed class WebhookDispatcherConsumer : BackgroundService
 {
-    private const int MaxRetries = 3;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IRabbitMqConnectionFactory _connectionFactory;
     private readonly RabbitMqOptions _rabbitMqOptions;
@@ -165,10 +164,10 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
             var payload = envelope.GetRawText();
             var payloadBytes = Encoding.UTF8.GetBytes(payload);
 
-            // Dispatch to each subscription
+            var allDelivered = true;
             foreach (var subscription in subscriptions)
             {
-                await DispatchWebhookAsync(
+                var delivered = await DispatchWebhookAsync(
                     dbContext,
                     httpClientFactory,
                     dataProtection,
@@ -178,34 +177,29 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
                     payload,
                     payloadBytes,
                     ct);
+
+                allDelivered &= delivered;
             }
 
             await dbContext.SaveChangesAsync(ct);
-            await _channel.BasicAckAsync(args.DeliveryTag, false, ct);
+
+            if (allDelivered)
+            {
+                await _channel.BasicAckAsync(args.DeliveryTag, false, ct);
+                return;
+            }
+
+            _logger.LogWarning("Webhook event {EventId} delivery failed. Dead-lettering.", eventId);
+            await _channel.BasicNackAsync(args.DeliveryTag, false, false, ct);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to process webhook event {EventId}. Retrying later.", eventId);
-
-            // Check retry count from headers
-            var retryCount = args.BasicProperties.Headers?.ContainsKey("x-retry-count") == true
-                ? Convert.ToInt32(args.BasicProperties.Headers["x-retry-count"])
-                : 0;
-
-            if (retryCount >= MaxRetries)
-            {
-                _logger.LogWarning("Event {EventId} exceeded max retries. Dead-lettering.", eventId);
-                await _channel.BasicNackAsync(args.DeliveryTag, false, false, ct);
-            }
-            else
-            {
-                // Requeue for retry
-                await _channel.BasicNackAsync(args.DeliveryTag, false, true, ct);
-            }
+            _logger.LogError(ex, "Failed to process webhook event {EventId}. Dead-lettering.", eventId);
+            await _channel.BasicNackAsync(args.DeliveryTag, false, false, ct);
         }
     }
 
-    private async Task DispatchWebhookAsync(
+    private async Task<bool> DispatchWebhookAsync(
         ErpHubDbContext dbContext,
         IHttpClientFactory httpClientFactory,
         IDataProtectionProvider dataProtectionProvider,
@@ -252,82 +246,57 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
             }
         }
 
-        // Attempt delivery with retry
-        for (var attempt = 1; attempt <= MaxRetries; attempt++)
+        try
         {
-            try
+            var client = httpClientFactory.CreateClient("WebhookDelivery");
+            client.Timeout = TimeSpan.FromSeconds(10);
+
+            var content = new ByteArrayContent(payloadBytes);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+            if (signature is not null)
             {
-                var client = httpClientFactory.CreateClient("WebhookDelivery");
-                client.Timeout = TimeSpan.FromSeconds(10);
+                content.Headers.Add("X-ERP-Hub-Signature-256", signature);
+            }
 
-                var content = new ByteArrayContent(payloadBytes);
-                content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            content.Headers.Add("X-ERP-Hub-Event-Id", eventId);
+            content.Headers.Add("X-ERP-Hub-Event-Type", eventType);
 
-                if (signature is not null)
-                {
-                    content.Headers.Add("X-ERP-Hub-Signature-256", signature);
-                }
+            var response = await client.PostAsync(subscription.WebhookUrl, content, ct);
+            var responseBody = await response.Content.ReadAsStringAsync(ct);
 
-                content.Headers.Add("X-ERP-Hub-Event-Id", eventId);
-                content.Headers.Add("X-ERP-Hub-Event-Type", eventType);
+            delivery.StatusCode = (int)response.StatusCode;
+            delivery.ResponseBody = responseBody.Length > 2000 ? responseBody[..2000] : responseBody;
+            delivery.AttemptCount = 1;
+            delivery.NextRetryAt = null;
 
-                var response = await client.PostAsync(subscription.WebhookUrl, content, ct);
-                var responseBody = await response.Content.ReadAsStringAsync(ct);
-
-                delivery.StatusCode = (int)response.StatusCode;
-                delivery.ResponseBody = responseBody.Length > 2000 ? responseBody[..2000] : responseBody;
-                delivery.AttemptCount = attempt;
+            if (response.IsSuccessStatusCode)
+            {
                 delivery.DeliveredAt = now;
+                dbContext.WebhookDeliveries.Add(delivery);
 
-                if (response.IsSuccessStatusCode)
-                {
-                    _logger.LogInformation(
-                        "Webhook delivered to {Url} for event {EventType}. Status: {StatusCode}",
-                        subscription.WebhookUrl, eventType, (int)response.StatusCode);
-                    break;
-                }
+                _logger.LogInformation(
+                    "Webhook delivered to {Url} for event {EventType}. Status: {StatusCode}",
+                    subscription.WebhookUrl, eventType, (int)response.StatusCode);
+                return true;
+            }
 
-                // Client error (4xx) — don't retry
-                if ((int)response.StatusCode is >= 400 and < 500)
-                {
-                    _logger.LogWarning(
-                        "Webhook delivery to {Url} failed with client error {StatusCode}. Not retrying.",
-                        subscription.WebhookUrl, (int)response.StatusCode);
-                    delivery.NextRetryAt = null;
-                    break;
-                }
+            dbContext.WebhookDeliveries.Add(delivery);
 
-                // Server error — retry with exponential backoff
-                if (attempt < MaxRetries)
-                {
-                    var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt) * 5); // 10s, 20s
-                    delivery.NextRetryAt = now.Add(delay);
-                    _logger.LogWarning(
-                        "Webhook delivery to {Url} failed with {StatusCode}. Retry {Attempt}/{Max} after {Delay}s",
-                        subscription.WebhookUrl, (int)response.StatusCode, attempt, MaxRetries, delay.TotalSeconds);
-                    await Task.Delay(delay, ct);
-                }
-            }
-            catch (Exception ex) when (attempt < MaxRetries)
-            {
-                var delay = TimeSpan.FromSeconds(Math.Pow(2, attempt) * 5);
-                delivery.AttemptCount = attempt;
-                delivery.NextRetryAt = now.Add(delay);
-                _logger.LogWarning(ex,
-                    "Webhook delivery to {Url} failed. Retry {Attempt}/{Max} after {Delay}s",
-                    subscription.WebhookUrl, attempt, MaxRetries, delay.TotalSeconds);
-                await Task.Delay(delay, ct);
-            }
-            catch (Exception ex)
-            {
-                delivery.AttemptCount = MaxRetries;
-                delivery.NextRetryAt = null;
-                _logger.LogError(ex,
-                    "Webhook delivery to {Url} failed permanently after {Attempts} attempts.",
-                    subscription.WebhookUrl, MaxRetries);
-            }
+            _logger.LogWarning(
+                "Webhook delivery to {Url} failed with {StatusCode}. Dead-lettering message.",
+                subscription.WebhookUrl, (int)response.StatusCode);
+            return false;
         }
+        catch (Exception ex)
+        {
+            delivery.AttemptCount = 1;
+            delivery.NextRetryAt = null;
+            delivery.ResponseBody = ex.Message.Length > 2000 ? ex.Message[..2000] : ex.Message;
+            dbContext.WebhookDeliveries.Add(delivery);
 
-        dbContext.WebhookDeliveries.Add(delivery);
+            _logger.LogError(ex, "Webhook delivery to {Url} failed. Dead-lettering message.", subscription.WebhookUrl);
+            return false;
+        }
     }
 }

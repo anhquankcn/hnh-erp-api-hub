@@ -1,5 +1,4 @@
 using ERPApiHub.Application.RateLimiting;
-using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Options;
 using Moq;
 using StackExchange.Redis;
@@ -14,19 +13,19 @@ public class RateLimitServiceTests
         Enabled = true,
         WindowSeconds = 60,
         DefaultTier = RateLimitTier.TIER_3,
-        Tiers = new Dictionary<RateLimitTier, TierConfig>
+        Tiers = new Dictionary<string, TierConfig>
         {
-            [RateLimitTier.TIER_1] = new() { RequestsPerMinute = 10000, BurstMultiplier = 2 },
-            [RateLimitTier.TIER_2] = new() { RequestsPerMinute = 1000, BurstMultiplier = 2 },
-            [RateLimitTier.TIER_3] = new() { RequestsPerMinute = 100, BurstMultiplier = 2 }
+            ["TIER_1"] = new() { RequestsPerMinute = 10000, BurstMultiplier = 2 },
+            ["TIER_2"] = new() { RequestsPerMinute = 1000, BurstMultiplier = 2 },
+            ["TIER_3"] = new() { RequestsPerMinute = 100, BurstMultiplier = 2 }
         },
-        EndpointReduction = new Dictionary<EndpointType, double>
+        EndpointReduction = new Dictionary<string, double>
         {
-            [EndpointType.Ingestion] = 0.50,
-            [EndpointType.Query] = 1.00,
-            [EndpointType.WebhookManagement] = 0.10,
-            [EndpointType.Admin] = 0.05,
-            [EndpointType.Other] = 1.00
+            ["Ingestion"] = 0.50,
+            ["Query"] = 1.00,
+            ["WebhookManagement"] = 0.10,
+            ["Admin"] = 0.05,
+            ["Other"] = 1.00
         }
     };
 
@@ -66,7 +65,7 @@ public class RateLimitServiceTests
     public void GetBurstCapacity_T3_Returns200()
     {
         var options = CreateOptions();
-        var burst = options.GetBurstCapacity(RateLimitTier.TIER_3, EndpointType.Query);
+        var burst = options.GetBurstCapacity(RateLimitTier.TIER_3);
         Assert.Equal(200, burst); // 100 * 2
     }
 
@@ -77,7 +76,7 @@ public class RateLimitServiceTests
         var optionsWrapper = new OptionsWrapper<RateLimitOptions>(options);
 
         var service = new RateLimitService(
-            Mock.Of<IDistributedCache>(),
+            Mock.Of<IConnectionMultiplexer>(),
             optionsWrapper,
             Mock.Of<ILogger<RateLimitService>>());
 
@@ -93,7 +92,7 @@ public class RateLimitServiceTests
         var optionsWrapper = new OptionsWrapper<RateLimitOptions>(options);
 
         var service = new RateLimitService(
-            Mock.Of<IDistributedCache>(),
+            Mock.Of<IConnectionMultiplexer>(),
             optionsWrapper,
             Mock.Of<ILogger<RateLimitService>>());
 

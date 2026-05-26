@@ -93,10 +93,11 @@ app.UseMiddleware<RequestLoggingMiddleware>();
 // S3-004: Global exception handler (RFC 7807)
 app.UseMiddleware<ProblemDetailsMiddleware>();
 
-// S3-001: Rate limiting middleware (before auth so headers are set)
+app.UseAuthentication();
+
+// S3-001: Rate limiting middleware (after auth so context.User is populated)
 app.UseMiddleware<RateLimitMiddleware>();
 
-app.UseAuthentication();
 app.UseAuthorization();
 
 // Root & health
