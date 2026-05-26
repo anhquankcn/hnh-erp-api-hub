@@ -1,10 +1,12 @@
 using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
+using ERPApiHub.Infrastructure.ErpNext;
 using ERPApiHub.Infrastructure.Messaging;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Polly.Extensions.Http;
 using StackExchange.Redis;
 
 namespace ERPApiHub.Infrastructure;
@@ -20,17 +22,48 @@ public static class DependencyInjection
         services.AddDbContext<ErpHubDbContext>(options => options.UseNpgsql(connectionString));
         services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
         services.Configure<RedisOptions>(configuration.GetSection(RedisOptions.SectionName));
+        services.Configure<ErpNextOptions>(configuration.GetSection(ErpNextOptions.SectionName));
 
         var redisConnectionString = BuildRedisConnectionString(configuration);
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnectionString));
         services.AddScoped<IRedisCacheService, RedisCacheService>();
+
+        // ERPNext HTTP Client with Polly retry
+        services.AddHttpClient<IErpNextClient, ErpNextHttpClient>(client =>
+        {
+            var opts = configuration.GetSection(ErpNextOptions.SectionName).Get<ErpNextOptions>() ?? new();
+            client.Timeout = opts.Timeout;
+        })
+        .AddPolicyHandler((serviceProvider, request) =>
+        {
+            var opts = serviceProvider.GetRequiredService<Microsoft.Extensions.Options.IOptions<ErpNextOptions>>().Value;
+            return Policy
+                .HandleResult<HttpResponseMessage>(response => (int)response.StatusCode >= 500)
+                .Or<HttpRequestException>()
+                .Or<TimeoutException>()
+                .WaitAndRetryAsync(
+                    opts.RetryCount,
+                    retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                    onRetry: (outcome, delay, retryCount, context) =>
+                    {
+                        var logger = serviceProvider.GetService<Microsoft.Extensions.Logging.ILogger<ErpNextHttpClient>>();
+                        logger?.LogWarning(
+                            "ERPNext request failed with {StatusCode}. Retrying in {RetryDelay}s... ({RetryCount}/{MaxRetries})",
+                            outcome.Result?.StatusCode ?? 0,
+                            delay.TotalSeconds,
+                            retryCount,
+                            opts.RetryCount);
+                    });
+        });
+
+        services.AddDataProtection();
+        services.AddMemoryCache();
 
         services
             .AddHealthChecks()
             .AddRedis(redisConnectionString, name: "redis", tags: ["ready", "startup"]);
 
         services.AddSingleton<IRabbitMqConnectionFactory, RabbitMqConnectionFactory>();
-        services.AddScoped<IErpNextClient, NoOpErpNextClient>();
 
         return services;
     }
