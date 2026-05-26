@@ -5,12 +5,26 @@ services:
       POSTGRES_DB: erphub_api_db
       POSTGRES_USER: erphub
       POSTGRES_PASSWORD: ${ERPHUB_DB_PASSWORD:-erphub}
-    ports:
-      - "5452:5432"
+    # ports: # Do not publish infra ports by default; uncomment for local dev only
+    #   - "5452:5432"
     volumes:
       - erphub-postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U erphub -d erphub_api_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: erphub-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-redis}"]
+    # ports: # Do not publish infra ports by default; uncomment for local dev only
+    #   - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-redis} ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -20,9 +34,9 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-guest}
-    ports:
-      - "5672:5672"
-      - "15672:15672"
+    # ports: # Do not publish infra ports by default; uncomment for local dev only
+    #   - "5672:5672"
+    #   - "15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
@@ -52,6 +66,8 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ConnectionStrings__Default: Host=postgres;Port=5432;Database=erphub_api_db;Username=erphub;Password=${ERPHUB_DB_PASSWORD:-erphub}
+      Redis__ConnectionString: redis:6379,password=${REDIS_PASSWORD:-redis},abortConnect=false
+      Redis__Password: ${REDIS_PASSWORD:-redis}
       RabbitMQ__Host: rabbitmq
       RabbitMQ__Username: ${RABBIT_USER:-guest}
       RabbitMQ__Password: ${RABBIT_PASS:-guest}
@@ -64,6 +80,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       rabbitmq:
         condition: service_healthy
       keycloak:
@@ -75,10 +93,10 @@ services:
       dockerfile: src/ERPApiHub/Dockerfile.gateway
     environment:
       ASPNETCORE_ENVIRONMENT: Production
-      Keycloak__Authority: http://keycloak:8080/realms/HNHTravel-SGN
-      Keycloak__Audience: erp-api-hub
-      Keycloak__RequireHttpsMetadata: false
-      ReverseProxy__Clusters__erp-api-hub__Destinations__api__Address: http://erp-api-hub:8008/
+      Authentication__Authority: http://keycloak:8080/realms/HNHTravel-SGN
+      Authentication__Audience: ${KEYCLOAK_AUDIENCE:-1stopshop-api}
+      Authentication__RequireHttpsMetadata: "false"
+      ReverseProxy__Clusters__erp-api-hub__Destinations__primary__Address: http://erp-api-hub:8008/
     ports:
       - "8888:8888"
     depends_on:
@@ -94,6 +112,8 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ConnectionStrings__Default: Host=postgres;Port=5432;Database=erphub_api_db;Username=erphub;Password=${ERPHUB_DB_PASSWORD:-erphub}
+      Redis__ConnectionString: redis:6379,password=${REDIS_PASSWORD:-redis},abortConnect=false
+      Redis__Password: ${REDIS_PASSWORD:-redis}
       RabbitMQ__Host: rabbitmq
       RabbitMQ__Username: ${RABBIT_USER:-guest}
       RabbitMQ__Password: ${RABBIT_PASS:-guest}
@@ -105,6 +125,8 @@ services:
       - "8009"
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
