@@ -1,7 +1,7 @@
 # Business Requirements Document (BRD)
 # ERP API Hub — HNH Travel
 
-**Document Version:** 1.0-Draft  
+**Document Version:** 1.1-Draft  
 **Date:** 2026-05-26  
 **Author:** HNH Technical Team  
 **Status:** Draft — Pending Review  
@@ -11,7 +11,13 @@
 ## 1. Executive Summary
 
 ### 1.1 Overview
-ERP API Hub là cổng kết nối trung tâm (integration gateway) cho phép các hệ thống bên ngoài (external systems) giao tiếp hai chiều với hệ thống ERP HNH Travel. API Hub đóng vai trò là lớp abstraction giữa ERP core và các đối tác/dịch vụ bên ngoài, đảm bảo tính bảo mật, nhất quán và khả năng mở rộng.
+ERP API Hub là cổng kết nối trung tâm (integration gateway) cho phép các hệ thống nghiệp vụ giao tiếp hai chiều với **ERPNext — Core Master Data** của HNH Travel.
+
+**Core Paradigm:** ERPNext đóng vai trò **Single Source of Truth**:
+- **Push (Inbound):** Các hệ thống nghiệp vụ đẩy dữ liệu phát sinh vào ERP qua API Hub → ERP lưu trữ master data
+- **Pull (Outbound):** Các hệ thống nghiệp vụ truy vấn ERP qua API Hub → lấy data mà hệ thống khác đã đẩy vào
+
+API Hub đóng vai trò là lớp abstraction giữa ERP core và các hệ thống nghiệp vụ, đảm bảo tính bảo mật, nhất quán và khả năng mở rộng.
 
 ### 1.2 Business Problem
 Hiện tại, ERP HNH Travel vận hành như một hệ sinh thái khép kín (closed ecosystem). Các nghiệp vụ sau đây đang gặp khó khăn:
@@ -90,8 +96,9 @@ Xây dựng **ERP API Hub** — một service layer chuyên biệt quản lý to
 
 #### Phase 1 — Foundation (Month 1-2)
 - **Core API Gateway Integration**
-  - Mở rộng Kong configuration để hỗ trợ external consumers
-  - JWT authentication qua Keycloak shared realm
+  - Kong 3.x DB-less (public, port 8000): JWT auth, rate limiting, API key, request transformation cho external partners
+  - YARP .NET 9 (internal, port 8888): JWT auth, branch_id injection, routing cho 1StopShop services (unchanged)
+  - Keycloak shared realm `HNHTravel-SGN`
   - Rate limiting per consumer/API key
   - Correlation ID propagation
   
@@ -176,12 +183,13 @@ Xây dựng **ERP API Hub** — một service layer chuyên biệt quản lý to
 **Actor:** E-commerce website / mobile app  
 **Trigger:** Customer hoàn tất đặt tour online  
 **Flow:**
-1. Website gửi order data qua API Hub
+1. Website gửi order data qua API Hub (Push vào ERP — Core Master Data)
 2. API Hub validate (tour availability, pricing, customer info)
-3. API Hub tạo booking trong TicketingService
-4. API Hub tạo quotation trong QuotationService
-5. API Hub gửi notification qua NotificationService
-6. Website nhận booking confirmation
+3. API Hub push order vào ERPNext (Sales Order / Quotation)
+4. API Hub publish event `erphub.ingestion.order.created` vào 1stopshop_event_bus
+5. TicketingService consume event → tạo booking internally
+6. API Hub gửi notification qua NotificationService
+7. Website nhận booking confirmation
 
 **Business Value:** Tự động hóa quy trình đặt tour online → giảm thời gian xử lý từ giờ xuống phút
 
@@ -261,10 +269,10 @@ Xây dựng **ERP API Hub** — một service layer chuyên biệt quản lý to
 
 | # | Constraint | Impact |
 |---|-----------|--------|
-| C1 | Phải tương thích với existing ERP services (.NET Core 8, PostgreSQL) | Tech stack không tự do lựa chọn |
+| C1 | Phải tương thích với existing ERP services (.NET 9, PostgreSQL) | Tech stack không tự do lựa chọn |
 | C2 | Không được sửa đổi ERP core logic | API Hub phải work around existing APIs |
 | C3 | Keycloak shared realm — không được tạo realm riêng | Auth config phải phối hợp với IT admin |
-| C4 | Kong DB-less mode — config phải declarative | Thay đổi routing cần redeploy Kong |
+| C4 | Kong DB-less (public :8000) + YARP (internal :8888) — cần maintain 2 gateway configs | Thay đổi routing cần redeploy Kong; YARP config riêng |
 | C5 | Module FIN hoạt động độc lập — không giao tiếp trực tiếp | Financial data flows qua FIN, không qua API Hub |
 | C6 | Multi-branch support — data isolation required | Complexity tăng với tenant context |
 | C7 | Vietnamese travel industry compliance | Tax, invoice rules phải đúng quy định VN |

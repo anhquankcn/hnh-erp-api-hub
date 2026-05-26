@@ -1,7 +1,7 @@
 # Functional Requirements Document (FRD)
 # ERP API Hub — HNH Travel
 
-**Document Version:** 1.0-Draft  
+**Document Version:** 1.2-Draft  
 **Date:** 2026-05-26  
 **Author:** HNH Technical Team  
 **Status:** Draft — Pending Review  
@@ -93,9 +93,15 @@ The ERP API Hub provides:
 │          └──────────────────────┼────────────────────────────┘                │
 │                                 │                                             │
 │                          ┌──────▼──────┐                                      │
-│    Kong (Public:8000)  ←→│ YARP API Gateway │  ← Internal Workspace                 │
-│                          │   3.x       │     JWT Validation                     │
-│                          │ DB-less     │     Rate Limiting                      │
+│                          │    Kong      │  ← Public API Gateway               │
+│                          │  (:8000)     │     JWT, Rate Limit, API Key         │
+│                          │   DB-less    │     Request Transform                │
+│                          └──────┬──────┘                                      │
+│                                 │                                             │
+│                          ┌──────▼──────┐                                      │
+│                          │    YARP     │  ← Internal Gateway                  │
+│                          │  (:8888)     │     JWT, Branch ID Inject             │
+│                          │  (.NET 9)    │     Routing to Services               │
 │                          └──────┬──────┘                                      │
 │                                 │                                             │
 │          ┌──────────────────────┼──────────────────────┐                       │
@@ -103,7 +109,7 @@ The ERP API Hub provides:
 │   ┌──────▼──────┐      ┌─────▼─────┐      ┌──────▼──────┐                │
 │   │   Workspace   │      │  ERP API  │      │   Module    │                │
 │   │   Services    │      │   Hub     │      │    FIN      │                │
-│   │ (.NET Core)   │      │(.NET Core│      │  (Độc lập)  │                │
+│   │ (.NET 9)   │      │(.NET 9│      │  (Độc lập)  │                │
 │   │               │      │    8)     │      │             │                │
 │   │ /api/core/*   │      │/api/erp/* │      │ /api/fin/*  │                │
 │   │ /api/crm/*    │      │           │      │             │                │
@@ -127,7 +133,7 @@ The ERP API Hub provides:
 |-----------|-----------|---------------|---------|
 | Kong API Gateway | Kong 3.x (DB-less) | Public-facing API gateway cho ERP API Hub: JWT, rate limiting, API key auth, transformation | ✅ New |
 | YARP API Gateway | YARP (.NET 9) | Internal gateway cho 1StopShop: JWT, routing, branch_id injection | ✅ Shared với Workspace |
-| ERP API Hub | .NET Core 8 | Business logic, transformation, orchestration | ❌ Dedicated |
+| ERP API Hub | .NET 9 | Business logic, transformation, orchestration | ❌ Dedicated |
 | PostgreSQL | PostgreSQL 18 | Audit logs, system registry, config | ✅ Shared (DB riêng: `erphub_api_db`) |
 | Redis | Redis 7.x | Response cache, rate limit counters, sessions | ✅ Shared (prefix: `erphub:`) |
 | RabbitMQ | RabbitMQ 3.12 | Async ingestion, event bus, retry/DLQ | ✅ Shared (exchange riêng: `1stopshop_event_bus`) |
@@ -557,7 +563,7 @@ Enables ERPNext to push event notifications to external systems via HTTP callbac
   - Tạo Server Script trong ERPNext UI: Settings → Server Script → New
   - Script type: "Document Event" (After Insert, After Update, Before Delete)
   - Script gọi API Hub webhook endpoint: POST /internal/v1/events/ingest
-  - Payload: `{"event_type": "booking_created", "doctype": "Booking", "name": "BOOK-2026-00001", "timestamp": "..."}`
+  - Payload: `{"eventType": "booking_created", "doctype": "Booking", "name": "BOOK-2026-00001", "timestamp": "..."}`
 - **Security:**
   - API Hub endpoint /internal/v1/events chỉ accept từ ERPNext internal IP
   - HMAC signature verification giữa ERPNext và API Hub
@@ -1441,9 +1447,15 @@ Dựa trên HNH Travel System Architecture Document (HNH-TDD-SA-002), ERP API Hu
 │          └──────────────────────┼────────────────────────────┘                │
 │                                 │                                             │
 │                          ┌──────▼──────┐                                      │
-│    Kong (Public:8000)  ←→│ YARP API Gateway │  ← Internal Workspace                 │
-│                          │   3.x       │     JWT Validation                     │
-│                          │ DB-less     │     Rate Limiting                      │
+│                          │    Kong      │  ← Public API Gateway               │
+│                          │  (:8000)     │     JWT, Rate Limit, API Key         │
+│                          │   DB-less    │     Request Transform                │
+│                          └──────┬──────┘                                      │
+│                                 │                                             │
+│                          ┌──────▼──────┐                                      │
+│                          │    YARP     │  ← Internal Gateway                  │
+│                          │  (:8888)     │     JWT, Branch ID Inject             │
+│                          │  (.NET 9)    │     Routing to Services               │
 │                          └──────┬──────┘                                      │
 │                                 │                                             │
 │          ┌──────────────────────┼──────────────────────┐                       │
@@ -1451,7 +1463,7 @@ Dựa trên HNH Travel System Architecture Document (HNH-TDD-SA-002), ERP API Hu
 │   ┌──────▼──────┐      ┌─────▼─────┐      ┌──────▼──────┐                │
 │   │   Workspace   │      │  ERP API  │      │   Module    │                │
 │   │   Services    │      │   Hub     │      │    FIN      │                │
-│   │ (.NET Core)   │      │(.NET Core│      │  (Độc lập)  │                │
+│   │ (.NET 9)   │      │(.NET 9│      │  (Độc lập)  │                │
 │   │               │      │    8)     │      │             │                │
 │   │ /api/core/*   │      │/api/erp/* │      │ /api/fin/*  │                │
 │   │ /api/crm/*    │      │           │      │             │                │
@@ -1505,7 +1517,7 @@ External System ──► Kong (:8000, JWT validate) ──► API Hub ──►
 
 | Thành phần | Lựa chọn | Lý do |
 |-----------|---------|-------|
-| API Hub Service | .NET Core 8 | Team có expertise; consistency với workspace services; rich middleware ecosystem (rate limiting, auth, caching) |
+| API Hub Service | .NET 9 | Team có expertise; consistency với workspace services; rich middleware ecosystem (rate limiting, auth, caching) |
 | Database | PostgreSQL 18 (shared) | Infrastructure hiện có; audit logs, config, registry |
 | Cache | Redis 7 (shared, prefix `erphub:`) | Response caching, rate limit counters, session store |
 | Message Queue | RabbitMQ 3.12 (exchange `1stopshop_event_bus`) | Async ingestion; cách ly khỏi workspace events |
@@ -1702,7 +1714,7 @@ Exchange: 1stopshop_event_bus (topic, durable)
 
 | # | Decision | Lựa chọn | Lý do |
 |---|----------|---------|-------|
-| ADR-001 | API Hub stack | .NET Core 8 | Team expertise; consistency với workspace services |
+| ADR-001 | API Hub stack | .NET 9 | Team expertise; consistency với workspace services |
 | ADR-002 | Auth pattern | Auth Proxy (Option C) | Không sửa ERPNext core; tận dụng Keycloak hiện có |
 | ADR-003 | Tenant isolation | ERPNext Sites + Tenant Registry | Native ERPNext multi-tenancy; dynamic resolution |
 | ADR-004 | Event sourcing | Hybrid: Server Script + Polling | ERPNext không có native webhooks; minimal intrusion |
