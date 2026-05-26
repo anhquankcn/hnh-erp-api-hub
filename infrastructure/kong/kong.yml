@@ -12,7 +12,7 @@ services:
       - name: erp-api-hub-v1
         paths:
           - /api/v1
-        strip_path: true
+        strip_path: false
         regex_priority: 0
 
   - name: erp-gateway
@@ -23,7 +23,7 @@ services:
       - name: erp-gateway-internal
         paths:
           - /internal
-        strip_path: true
+        strip_path: false
         regex_priority: 1
 
 plugins:

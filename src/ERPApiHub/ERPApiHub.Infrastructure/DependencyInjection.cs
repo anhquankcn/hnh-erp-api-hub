@@ -13,7 +13,7 @@ public static class DependencyInjection
     {
         var connectionString = configuration.GetConnectionString("Default")
             ?? configuration["ConnectionStrings:Default"]
-            ?? "Host=localhost;Port=5452;Database=erphub_api_db;Username=erphub;Password=erphub";
+            ?? throw new InvalidOperationException("ConnectionStrings:Default is not configured. Set it in appsettings, user secrets, or environment variables.");
 
         services.AddDbContext<ErpHubDbContext>(options => options.UseNpgsql(connectionString));
         services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));

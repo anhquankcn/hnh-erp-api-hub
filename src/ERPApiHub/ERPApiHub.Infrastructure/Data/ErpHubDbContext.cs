@@ -1,12 +1,15 @@
+using System.Security.Claims;
 using ERPApiHub.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Http;
 
 namespace ERPApiHub.Infrastructure.Data;
 
-public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options) : DbContext(options)
+public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options, IHttpContextAccessor? httpContextAccessor = null) : DbContext(options)
 {
+    private readonly IHttpContextAccessor? _httpContextAccessor = httpContextAccessor;
     public DbSet<ExternalSystem> ExternalSystems => Set<ExternalSystem>();
-    public DbSet<TenantRegistry> TenantRegistry => Set<TenantRegistry>();
+    public DbSet<TenantRegistry> TenantRegistries => Set<TenantRegistry>();
     public DbSet<ApiKeyMapping> ApiKeyMappings => Set<ApiKeyMapping>();
     public DbSet<FieldMapping> FieldMappings => Set<FieldMapping>();
     public DbSet<AuditLog> AuditLogs => Set<AuditLog>();
@@ -220,8 +223,8 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options) :
         entity.Property(x => x.CreatedAt).HasColumnName("created_at").HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
         entity.Property(x => x.UpdatedAt).HasColumnName("updated_at").HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
         entity.Property(x => x.DeletedAt).HasColumnName("deleted_at").HasColumnType("timestamp with time zone");
-        entity.Property(x => x.CreatedBy).HasColumnName("created_by").HasMaxLength(26);
-        entity.Property(x => x.UpdatedBy).HasColumnName("updated_by").HasMaxLength(26);
+        entity.Property(x => x.CreatedBy).HasColumnName("created_by").HasMaxLength(255);
+        entity.Property(x => x.UpdatedBy).HasColumnName("updated_by").HasMaxLength(255);
     }
 
     private static void SeedBootstrapData(ModelBuilder modelBuilder)
@@ -258,22 +261,31 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options) :
     private void ApplyAuditTimestamps()
     {
         var now = DateTimeOffset.UtcNow;
+        var userId = _httpContextAccessor?.HttpContext?.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
         foreach (var entry in ChangeTracker.Entries<AuditableEntity>())
         {
             if (entry.State == EntityState.Added)
             {
                 entry.Entity.CreatedAt = now;
                 entry.Entity.UpdatedAt = now;
+                if (userId is not null && entry.Entity.CreatedBy is null)
+                    entry.Entity.CreatedBy = userId;
+                if (userId is not null && entry.Entity.UpdatedBy is null)
+                    entry.Entity.UpdatedBy = userId;
             }
             else if (entry.State == EntityState.Modified)
             {
                 entry.Entity.UpdatedAt = now;
+                if (userId is not null)
+                    entry.Entity.UpdatedBy = userId;
             }
             else if (entry.State == EntityState.Deleted)
             {
                 entry.State = EntityState.Modified;
                 entry.Entity.DeletedAt = now;
                 entry.Entity.UpdatedAt = now;
+                if (userId is not null)
+                    entry.Entity.UpdatedBy = userId;
             }
         }
     }
