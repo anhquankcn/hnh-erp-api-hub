@@ -1,5 +1,7 @@
 using System.Text.Json;
 using ERPApiHub.Application.Audit;
+using ERPApiHub.Application.Compliance;
+using ERPApiHub.Application.Configuration;
 using ERPApiHub.Application.Errors;
 using ERPApiHub.Application.Ingestion;
 using ERPApiHub.Application.Query;
@@ -45,6 +47,16 @@ builder.Services.AddHttpClient("WebhookDelivery");
 // S3-001: Rate Limiting
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(RateLimitOptions.SectionName));
 builder.Services.AddScoped<RateLimitService>();
+
+// S3-002: External System Configuration
+builder.Services.AddScoped<ExternalSystemService>();
+
+// S3-003: ERPNext Event Ingestion
+builder.Services.Configure<ErpNextEventOptions>(builder.Configuration.GetSection(ErpNextEventOptions.SectionName));
+builder.Services.AddScoped<ErpNextEventIngestionService>();
+
+// S3-006: Vietnam Compliance
+builder.Services.AddSingleton<VietnamComplianceService>();
 
 // Authorization policies
 builder.Services.AddAuthorizationBuilder()
@@ -221,6 +233,100 @@ app.MapGet("/api/v1/webhooks/deliveries/{subscriptionId}", async (string subscri
     return Results.Ok(deliveries);
 }).RequireAuthorization("api-hub:admin");
 
+// ─── ERPNext Event Ingestion Endpoint (S3-003) ───
+
+app.MapPost("/internal/v1/events/ingest", async (HttpContext ctx, ErpNextEventIngestionService service, CancellationToken ct) =>
+{
+    using var reader = new StreamReader(ctx.Request.Body);
+    var rawBody = await reader.ReadToEndAsync(ct);
+    var signatureHeader = ctx.Request.Headers["X-ERP-Hub-Signature-256"].FirstOrDefault() ?? string.Empty;
+
+    if (!service.ValidateSignature(rawBody, signatureHeader))
+    {
+        return Results.Unauthorized();
+    }
+
+    System.Text.Json.JsonElement envelope;
+    try
+    {
+        var doc = System.Text.Json.JsonDocument.Parse(rawBody);
+        envelope = doc.RootElement.Clone();
+    }
+    catch (System.Text.Json.JsonException)
+    {
+        return Results.BadRequest(new { error = "Invalid JSON payload." });
+    }
+
+    var (isValid, validationError) = service.ValidateEnvelope(envelope);
+    if (!isValid)
+    {
+        return Results.BadRequest(new { error = validationError });
+    }
+
+    await service.ProcessEventAsync(envelope, ct);
+    return Results.Accepted(null, new { status = "accepted" });
+}).AllowAnonymous();
+
+// ─── External System Configuration Endpoints (S3-002) ───
+
+app.MapPost("/api/v1/systems", async (CreateExternalSystemRequest req, ExternalSystemService service, HttpContext ctx, CancellationToken ct) =>
+{
+    var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
+    var system = await service.CreateAsync(req, tenantId, ct);
+    return Results.Created($"/api/v1/systems/{system.SystemId}", system);
+}).RequireAuthorization("api-hub:admin");
+
+app.MapGet("/api/v1/systems", async (int? page, int? pageSize, ExternalSystemService service, HttpContext ctx, CancellationToken ct) =>
+{
+    var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
+    var (systems, total) = await service.ListAsync(tenantId, page ?? 1, pageSize ?? 20, ct);
+    return Results.Ok(new { items = systems, total });
+}).RequireAuthorization("api-hub:admin");
+
+app.MapGet("/api/v1/systems/{systemId}", async (string systemId, ExternalSystemService service, CancellationToken ct) =>
+{
+    var system = await service.GetByIdAsync(systemId, ct);
+    return system is null ? Results.NotFound(new { error = "System not found" }) : Results.Ok(system);
+}).RequireAuthorization("api-hub:read");
+
+app.MapPut("/api/v1/systems/{systemId}", async (string systemId, UpdateExternalSystemRequest req, ExternalSystemService service, CancellationToken ct) =>
+{
+    var system = await service.UpdateAsync(systemId, req, ct);
+    return Results.Ok(system);
+}).RequireAuthorization("api-hub:admin");
+
+app.MapDelete("/api/v1/systems/{systemId}", async (string systemId, ExternalSystemService service, CancellationToken ct) =>
+{
+    await service.DeleteAsync(systemId, ct);
+    return Results.NoContent();
+}).RequireAuthorization("api-hub:admin");
+
+app.MapPost("/api/v1/systems/{systemId}/rotate-key", async (string systemId, RotateApiKeyRequest req, ExternalSystemService service, CancellationToken ct) =>
+{
+    var mapping = await service.RotateApiKeyAsync(systemId, req.NewApiKey, req.NewApiSecret, ct);
+    return Results.Ok(new { mapping_id = mapping.MappingId, created_at = mapping.CreatedAt });
+}).RequireAuthorization("api-hub:admin");
+
+// ─── Vietnam Compliance Endpoints (S3-006) ───
+
+app.MapPost("/api/v1/compliance/tax-id/validate", (TaxIdValidationRequest req, VietnamComplianceService service) =>
+{
+    var (isValid, error) = service.ValidateTaxId(req.TaxId);
+    return Results.Ok(new { valid = isValid, error });
+}).RequireAuthorization("api-hub:read");
+
+app.MapPost("/api/v1/compliance/e-invoice/validate", (EInvoiceRequest req, VietnamComplianceService service) =>
+{
+    var (isValid, errors) = service.ValidateEInvoice(req);
+    return Results.Ok(new { valid = isValid, errors });
+}).RequireAuthorization("api-hub:read");
+
+app.MapPost("/api/v1/compliance/invoice-template/validate", (InvoiceTemplateValidationRequest req, VietnamComplianceService service) =>
+{
+    var (isValid, error) = service.ValidateInvoiceTemplate(req.Template);
+    return Results.Ok(new { valid = isValid, error });
+}).RequireAuthorization("api-hub:read");
+
 // ─── Health Checks ───
 
 app.MapHealthChecks("/health/live", new HealthCheckOptions
@@ -246,7 +352,7 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 
 app.Run();
 
-// ─── Webhook Request DTOs ───
+// ─── Request DTOs ───
 
 public sealed record CreateWebhookSubscriptionRequest
 {
@@ -261,6 +367,22 @@ public sealed record UpdateWebhookSubscriptionRequest
     public string[]? EventTypes { get; init; }
     public string? WebhookUrl { get; init; }
     public string? Secret { get; init; }
+}
+
+public sealed record RotateApiKeyRequest
+{
+    public string NewApiKey { get; init; } = string.Empty;
+    public string NewApiSecret { get; init; } = string.Empty;
+}
+
+public sealed record TaxIdValidationRequest
+{
+    public string TaxId { get; init; } = string.Empty;
+}
+
+public sealed record InvoiceTemplateValidationRequest
+{
+    public string Template { get; init; } = string.Empty;
 }
 
 static Task WriteHealthCheckResponseAsync(HttpContext context, HealthReport report)
