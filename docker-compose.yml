@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: erphub_api_db
+      POSTGRES_USER: erphub
+      POSTGRES_PASSWORD: ${ERPHUB_DB_PASSWORD:-erphub}
+    ports:
+      - "5452:5432"
+    volumes:
+      - erphub-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erphub -d erphub_api_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-guest}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  erp-api-hub:
+    build:
+      context: .
+      dockerfile: src/ERPApiHub/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=erphub_api_db;Username=erphub;Password=${ERPHUB_DB_PASSWORD:-erphub}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ${RABBIT_USER:-guest}
+      RabbitMQ__Password: ${RABBIT_PASS:-guest}
+      RabbitMQ__ExchangeName: 1stopshop_event_bus
+    ports:
+      - "8008:8008"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  erp-worker:
+    build:
+      context: .
+      dockerfile: src/ERPApiHub/Dockerfile.worker
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=erphub_api_db;Username=erphub;Password=${ERPHUB_DB_PASSWORD:-erphub}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ${RABBIT_USER:-guest}
+      RabbitMQ__Password: ${RABBIT_PASS:-guest}
+      RabbitMQ__ExchangeName: 1stopshop_event_bus
+      RabbitMQ__IngestionQueue: erphub.ingestion
+      RabbitMQ__IngestionBindingKey: erphub.ingestion.#
+      RabbitMQ__IngestionDeadLetterQueue: erphub.dlq.ingestion
+    expose:
+      - "8009"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  erphub-postgres-data:
