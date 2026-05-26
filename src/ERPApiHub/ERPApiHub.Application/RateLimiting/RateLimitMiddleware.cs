@@ -1,8 +1,11 @@
+using System.Text.Json;
+using ERPApiHub.Application.Errors;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ERPApiHub.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
+using StackExchange.Redis;
 
 namespace ERPApiHub.Application.RateLimiting;
 
@@ -51,30 +54,72 @@ public sealed class RateLimitMiddleware
         var systemId = context.User.FindFirst("sub")?.Value
             ?? context.User.FindFirst("preferred_username")?.Value
             ?? "anonymous";
+        var tenantId = context.User.FindFirst("BranchId")?.Value;
 
         // Resolve tier — look up from external_systems if available, else default
         var tier = options.DefaultTier;
-        try
+        var tierResolvedFromCache = false;
+        if (!string.IsNullOrWhiteSpace(tenantId))
         {
-            var dbContext = context.RequestServices.GetRequiredService<ErpHubDbContext>();
-            var tenantId = context.User.FindFirst("BranchId")?.Value;
-            if (!string.IsNullOrWhiteSpace(tenantId))
+            try
             {
-                var system = await dbContext.ExternalSystems
-                    .AsNoTracking()
-                    .Where(s => s.TenantId == tenantId && s.IsActive && s.DeletedAt == null)
-                    .FirstOrDefaultAsync(context.RequestAborted);
+                var redis = context.RequestServices.GetRequiredService<IConnectionMultiplexer>();
+                var cached = await redis.GetDatabase().StringGetAsync(GetTierCacheKey(tenantId));
 
-                if (system is not null)
+                if (cached.HasValue)
                 {
-                    tier = rateLimitService.ResolveTier(system.RateLimitTier);
-                    systemId = system.SystemId;
+                    var cachedSystem = JsonSerializer.Deserialize<CachedRateLimitSystem>(cached.ToString());
+                    if (cachedSystem is not null)
+                    {
+                        tier = rateLimitService.ResolveTier(cachedSystem.RateLimitTier);
+                        systemId = cachedSystem.SystemId;
+                        tierResolvedFromCache = true;
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Redis cache read failed for rate limit tier resolution. Falling through to DB.");
+            }
         }
-        catch (Exception ex)
+
+        if (!tierResolvedFromCache)
         {
-            _logger.LogWarning(ex, "Failed to look up external system for rate limiting. Using default tier.");
+            try
+            {
+                var dbContext = context.RequestServices.GetRequiredService<ErpHubDbContext>();
+                if (!string.IsNullOrWhiteSpace(tenantId))
+                {
+                    var system = await dbContext.ExternalSystems
+                        .AsNoTracking()
+                        .Where(s => s.TenantId == tenantId && s.IsActive && s.DeletedAt == null)
+                        .FirstOrDefaultAsync(context.RequestAborted);
+
+                    if (system is not null)
+                    {
+                        tier = rateLimitService.ResolveTier(system.RateLimitTier);
+                        systemId = system.SystemId;
+
+                        try
+                        {
+                            var redis = context.RequestServices.GetRequiredService<IConnectionMultiplexer>();
+                            var cachedSystem = new CachedRateLimitSystem(system.SystemId, system.RateLimitTier);
+                            await redis.GetDatabase().StringSetAsync(
+                                GetTierCacheKey(tenantId),
+                                JsonSerializer.Serialize(cachedSystem),
+                                TimeSpan.FromSeconds(60));
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Redis cache write failed for rate limit tier resolution.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to look up external system for rate limiting. Using default tier.");
+            }
         }
 
         // Determine endpoint type from path
@@ -90,21 +135,32 @@ public sealed class RateLimitMiddleware
 
         if (!result.IsAllowed)
         {
+            var problem = ProblemDetailsHelper.RateLimited(
+                "Rate limit exceeded. Please retry later.",
+                result.ResetInSeconds,
+                path,
+                context.TraceIdentifier);
+
             context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
             context.Response.Headers["Retry-After"] = result.ResetInSeconds.ToString();
             context.Response.ContentType = "application/problem+json";
+            await context.Response.WriteAsJsonAsync(problem, context.RequestAborted);
+            return;
+        }
 
-            var problemDetails = new
-            {
-                type = "https://api.hnhtravel.work/errors/rate-limited",
-                title = "Rate Limit Exceeded",
-                status = 429,
-                detail = $"Rate limit of {result.Limit} requests per minute exceeded for {endpointType} endpoints",
-                instance = path,
-                retry_after = result.ResetInSeconds
-            };
+        var burstResult = await rateLimitService.CheckBurstAsync(systemId, tier, context.RequestAborted);
+        if (!burstResult)
+        {
+            var problem = ProblemDetailsHelper.RateLimited(
+                "Burst limit exceeded. Please retry later.",
+                result.ResetInSeconds,
+                path,
+                context.TraceIdentifier);
 
-            await context.Response.WriteAsJsonAsync(problemDetails, context.RequestAborted);
+            context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+            context.Response.Headers["Retry-After"] = result.ResetInSeconds.ToString();
+            context.Response.ContentType = "application/problem+json";
+            await context.Response.WriteAsJsonAsync(problem, context.RequestAborted);
             return;
         }
 
@@ -132,4 +188,8 @@ public sealed class RateLimitMiddleware
 
         return EndpointType.Other;
     }
+
+    private static string GetTierCacheKey(string tenantId) => $"erphub:system-tier:{tenantId}";
+
+    private sealed record CachedRateLimitSystem(string SystemId, string? RateLimitTier);
 }

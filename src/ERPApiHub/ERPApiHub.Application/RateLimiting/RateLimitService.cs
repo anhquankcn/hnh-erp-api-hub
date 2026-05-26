@@ -46,32 +46,31 @@ public sealed class RateLimitService
         var db = _redis.GetDatabase();
         var effectiveLimit = _options.GetEffectiveLimit(tier, endpointType);
         var windowKey = $"erphub:ratelimit:{systemId}:{endpointType.ToString().ToLower()}";
-        var window = TimeSpan.FromSeconds(_options.WindowSeconds);
-
         try
         {
-            // Fixed-window counter with atomic increment
-            var count = await db.StringIncrementAsync(windowKey);
+            const string luaScript = """
+                local current = redis.call('INCR', KEYS[1])
+                if current == 1 then
+                    redis.call('EXPIRE', KEYS[1], ARGV[1])
+                end
+                return current
+            """;
 
-            // Set TTL on first request in window
-            if (count == 1)
-            {
-                await db.KeyExpireAsync(windowKey, window);
-            }
+            var current = (long)await db.ScriptEvaluateAsync(
+                luaScript,
+                new RedisKey[] { windowKey },
+                new RedisValue[] { _options.WindowSeconds });
 
-            // Get remaining TTL for reset time
-            var ttl = await db.KeyTimeToLiveAsync(windowKey);
-            var resetInSeconds = ttl?.TotalSeconds ?? _options.WindowSeconds;
-
-            var remaining = Math.Max(0, effectiveLimit - (int)count);
-            var isAllowed = count <= effectiveLimit;
+            var remaining = Math.Max(0, effectiveLimit - (int)current);
+            var resetInSeconds = _options.WindowSeconds;
+            var isAllowed = current <= effectiveLimit;
 
             if (!isAllowed)
             {
                 _logger.LogWarning(
                     "Rate limit exceeded for system {SystemId} tier {Tier} endpoint {Endpoint}. " +
                     "Count: {Count}/{Limit}, Reset in {ResetSeconds}s",
-                    systemId, tier, endpointType, count, effectiveLimit, resetInSeconds);
+                    systemId, tier, endpointType, current, effectiveLimit, resetInSeconds);
             }
 
             return new RateLimitResult
@@ -84,9 +83,9 @@ public sealed class RateLimitService
                 ResetInSeconds = (int)resetInSeconds
             };
         }
-        catch (RedisConnectionException ex)
+        catch (RedisException ex)
         {
-            _logger.LogError(ex, "Redis connection failed during rate limit check. Allowing request (fail-open).");
+            _logger.LogError(ex, "Redis failed during rate limit check. Allowing request (fail-open).");
             // Fail-open: if Redis is down, allow the request
             return RateLimitResult.Allowed(tier, endpointType, effectiveLimit, effectiveLimit, 0);
         }
@@ -111,31 +110,36 @@ public sealed class RateLimitService
 
         try
         {
-            var current = await db.StringGetAsync(burstKey);
-            long currentCount = current.HasValue ? (long)current : 0;
+            const string luaScript = """
+                local current = redis.call('INCR', KEYS[1])
+                if current == 1 then
+                    redis.call('EXPIRE', KEYS[1], ARGV[2])
+                end
+                if current <= tonumber(ARGV[1]) then
+                    return 1
+                else
+                    redis.call('DECR', KEYS[1])
+                    return 0
+                end
+            """;
 
-            if (currentCount >= burstCapacity)
+            var allowed = (long)await db.ScriptEvaluateAsync(
+                luaScript,
+                new RedisKey[] { burstKey },
+                new RedisValue[] { burstCapacity, _options.WindowSeconds });
+
+            if (allowed != 1)
             {
                 _logger.LogWarning(
-                    "Burst limit exceeded for system {SystemId}. Burst: {Current}/{Capacity}",
-                    systemId, currentCount, burstCapacity);
-                return false;
+                    "Burst limit exceeded for system {SystemId}. Capacity: {Capacity}",
+                    systemId, burstCapacity);
             }
 
-            // Increment burst counter
-            var newCount = await db.StringIncrementAsync(burstKey);
-
-            // Set TTL to window if first burst request
-            if (newCount == 1)
-            {
-                await db.KeyExpireAsync(burstKey, TimeSpan.FromSeconds(_options.WindowSeconds));
-            }
-
-            return newCount <= burstCapacity;
+            return allowed == 1;
         }
-        catch (RedisConnectionException ex)
+        catch (RedisException ex)
         {
-            _logger.LogError(ex, "Redis connection failed during burst check. Allowing request (fail-open).");
+            _logger.LogError(ex, "Redis failed during burst check. Allowing request (fail-open).");
             return true;
         }
     }

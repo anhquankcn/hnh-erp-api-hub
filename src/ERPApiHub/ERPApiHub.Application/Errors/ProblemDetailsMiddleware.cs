@@ -55,7 +55,7 @@ public sealed class ProblemDetailsMiddleware
         {
             UnauthorizedAccessException => (
                 ProblemDetailsHelper.Unauthorized(
-                    exception.Message,
+                    "Authentication failed or access denied.",
                     path,
                     requestId),
                 StatusCodes.Status401Unauthorized),
@@ -76,21 +76,21 @@ public sealed class ProblemDetailsMiddleware
 
             ArgumentException => (
                 ProblemDetailsHelper.Validation(
-                    exception.Message,
+                    "Invalid request parameters.",
                     path,
                     requestId),
                 StatusCodes.Status400BadRequest),
 
             TimeoutException => (
                 ProblemDetailsHelper.ErpNextTimeout(
-                    exception.Message ?? "Request timed out",
+                    "The request timed out.",
                     path,
                     requestId),
                 StatusCodes.Status504GatewayTimeout),
 
-            HttpRequestException httpEx => (
+            HttpRequestException => (
                 ProblemDetailsHelper.ErpNextError(
-                    httpEx.Message,
+                    "An error occurred communicating with an external service.",
                     path,
                     requestId),
                 StatusCodes.Status502BadGateway),

@@ -8,6 +8,7 @@
     <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.11.1" />
     <PackageReference Include="OpenTelemetry.Instrumentation.Http" Version="1.11.1" />
     <PackageReference Include="RabbitMQ.Client" Version="7.1.2" />
+    <PackageReference Include="StackExchange.Redis" Version="2.8.37" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\ERPApiHub.Domain\ERPApiHub.Domain.csproj" />
