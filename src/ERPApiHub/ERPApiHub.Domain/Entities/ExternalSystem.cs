@@ -5,7 +5,9 @@ public sealed class ExternalSystem : AuditableEntity
     public string SystemId { get; set; } = string.Empty;
     public string SystemName { get; set; } = string.Empty;
     public string SystemType { get; set; } = string.Empty;
-    public string RateLimitTier { get; set; } = "standard";
+    public string? Description { get; set; }
+    public string? ContactEmail { get; set; }
+    public string RateLimitTier { get; set; } = "TIER_2";
     public string TenantId { get; set; } = string.Empty;
     public string? WebhookUrl { get; set; }
     public bool IsActive { get; set; } = true;
