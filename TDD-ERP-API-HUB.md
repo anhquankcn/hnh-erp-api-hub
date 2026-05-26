@@ -46,7 +46,8 @@ TDD này mô tả chi tiết kỹ thuật để implement ERP API Hub dựa trê
 | Database | PostgreSQL | 18 |
 | Cache | Redis | 7.x |
 | Message Queue | RabbitMQ | 3.12 |
-| API Gateway | YARP (Yet Another Reverse Proxy) | .NET 9 |
+| API Gateway (Public) | Kong | 3.x (DB-less) | JWT, rate limiting, API key auth |
+| API Gateway (Internal) | YARP (Reverse Proxy) | .NET 9 | Internal routing, branch_id injection |
 | Identity | Keycloak | (shared) |
 | ERP Backend | ERPNext / Frappe | v15 |
 | Logging | Serilog | latest |
@@ -67,8 +68,16 @@ TDD này mô tả chi tiết kỹ thuật để implement ERP API Hub dựa trê
 │   │                        YARP API Gateway (:8888)                        │   │
 │   │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────────┐  │   │
 │   │  │ /api/core/* │  │ /api/crm/*  │  │ /api/erp/*  → erp-api-hub   │  │   │
-│   │  │  → Core:8001│  │  → Crm:8002 │  │  → :8008                     │  │   │
+│   │  │  → Core:8001│  │  → Crm:8002 │  │  → :8008 (internal traffic) │  │   │
 │   │  └─────────────┘  └─────────────┘  └─────────────────────────────┘  │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                                      │                                        │
+│   ┌──────────────────────────────────┼──────────────────────────────────┐   │
+│   │                                  │  External Traffic               │   │
+│   │  ┌──────────────────────────────┼──────────────────────────────┐   │   │
+│   │  │     Kong API Gateway (:8000) │                              │   │   │
+│   │  │  /api/erp/* → erp-api-hub:8008 (JWT, rate limiting)        │   │   │
+│   │  └──────────────────────────────────────────────────────────────┘   │   │
 │   └─────────────────────────────────────────────────────────────────────┘   │
 │                                      │                                        │
 │   ┌──────────────────────────────────┼──────────────────────────────────┐   │
@@ -101,7 +110,8 @@ TDD này mô tả chi tiết kỹ thuật để implement ERP API Hub dựa trê
 ```
 React Shell         : 3458
 BFF                 : 8090
-YARP API Gateway    : 8888
+Kong API Gateway    : 8000 (public, DB-less)
+YARP API Gateway    : 8888 (internal)
 erp-api-hub        : 8008
 erp-worker          : 8009
 CoreService         : 8001
@@ -442,6 +452,25 @@ components:
 version: '3.8'
 
 services:
+  kong:
+    image: kong:3.6
+    environment:
+      - KONG_DATABASE=off
+      - KONG_DECLARATIVE_CONFIG=/etc/kong/kong.yml
+      - KONG_PROXY_ACCESS_LOG=/dev/stdout
+      - KONG_ADMIN_ACCESS_LOG=/dev/stdout
+      - KONG_PROXY_ERROR_LOG=/dev/stderr
+      - KONG_ADMIN_ERROR_LOG=/dev/stderr
+    volumes:
+      - ./kong/kong.yml:/etc/kong/kong.yml:ro
+    ports:
+      - "8000:8000"  # Proxy (public)
+      - "8443:8443"  # Proxy SSL (public)
+      - "8001:8001"  # Admin API (internal only)
+    networks:
+      - hnh-network
+    restart: unless-stopped
+
   erp-api-hub:
     build:
       context: ./src/ERPApiHub
@@ -491,7 +520,51 @@ networks:
     external: true
 ```
 
-### 5.2 YARP Configuration (yarp.json)
+### 5.2 Kong Configuration (kong.yml) — Public API Gateway
+
+```yaml
+# Kong DB-less declarative config cho public-facing ERP API Hub
+services:
+  - name: erp-api-hub
+    url: http://erp-api-hub:8008
+    routes:
+      - name: erp-api-routes
+        paths:
+          - /api/erp
+        strip_path: true
+        protocols:
+          - https
+    plugins:
+      - name: jwt
+        config:
+          uri_param_names: []
+          cookie_names: []
+          key_claim_name: iss
+          secret_is_base64: false
+          claims_to_verify:
+            - exp
+      - name: rate-limiting
+        config:
+          minute: 1000
+          policy: redis
+          redis_host: redis
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - X-Request-Source:external
+
+  - name: erp-api-hub-webhook
+    url: http://erp-api-hub:8008
+    routes:
+      - name: erp-api-internal
+        paths:
+          - /internal/erp
+        strip_path: true
+    plugins: []  # No JWT for internal webhook callbacks
+```
+
+### 5.3 YARP Configuration (yarp.json) — Internal API Gateway
 
 ```json
 {
@@ -499,36 +572,14 @@ networks:
     "Routes": {
       "erp-api": {
         "ClusterId": "erp-api-hub",
-        "Match": {
-          "Path": "/api/erp/{**catch-all}"
-        },
-        "Transforms": [
-          {
-            "PathRemovePrefix": "/api/erp"
-          }
-        ]
-      },
-      "erp-internal": {
-        "ClusterId": "erp-api-hub",
-        "Match": {
-          "Path": "/internal/erp/{**catch-all}"
-        },
-        "Transforms": [
-          {
-            "PathRemovePrefix": "/internal/erp"
-          }
-        ],
-        "Metadata": {
-          "no-auth": "true"
-        }
+        "Match": { "Path": "/api/erp/{**catch-all}" },
+        "Transforms": [{ "PathRemovePrefix": "/api/erp" }]
       }
     },
     "Clusters": {
       "erp-api-hub": {
         "Destinations": {
-          "destination1": {
-            "Address": "http://erp-api-hub:8008"
-          }
+          "destination1": { "Address": "http://erp-api-hub:8008" }
         }
       }
     }
@@ -714,10 +765,10 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 ### 9.1 Auth Pattern (A)
 
 ```
-External System → YARP (:8888)
+External System → Kong (:8000)
                       │
                       ▼
-              JWT Validation (RS256 via JWKS)
+              JWT Validation (Kong JWT Plugin, RS256 via JWKS)
                       │
                       ▼
               Extract Claims (BranchId, roles)
@@ -753,7 +804,7 @@ ERPNext Document Event
 Frappe Server Script
         │
         ▼
-POST /internal/erp/events (YARP → no auth)
+POST /internal/erp/events (Kong/YARP → no auth, HMAC validated)
         │
         ▼
 API Hub → validate HMAC

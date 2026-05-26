@@ -62,7 +62,8 @@ The ERP API Hub provides:
 - **HNH-TDD-SA-002 v1.0** — HNH Travel Workspace System Architecture Document
 - ERPNext REST API Documentation: https://frappeframework.com/docs/user/en/api/rest
 - Keycloak Documentation: https://www.keycloak.org/documentation
-- YARP API Gateway Documentation: https://docs.konghq.com/
+- Kong API Gateway Documentation: https://docs.konghq.com/
+- YARP API Gateway: https://microsoft.github.io/reverse-proxy/
 
 ---
 
@@ -83,7 +84,7 @@ The ERP API Hub provides:
 │          └──────────────────────┼────────────────────────────┘                │
 │                                 │                                             │
 │                          ┌──────▼──────┐                                      │
-│                          │ YARP API Gateway │  ← Shared with Workspace             │
+│    Kong (Public:8000)  ←→│ YARP API Gateway │  ← Internal Workspace                 │
 │                          │   3.x       │     JWT Validation                     │
 │                          │ DB-less     │     Rate Limiting                      │
 │                          └──────┬──────┘                                      │
@@ -115,7 +116,8 @@ The ERP API Hub provides:
 
 | Component | Technology | Responsibility | Shared? |
 |-----------|-----------|---------------|---------|
-| YARP API Gateway | YARP (.NET 9) (DB-less) | Edge proxy, JWT validation, routing, rate limiting | ✅ Shared với Workspace |
+| Kong API Gateway | Kong 3.x (DB-less) | Public-facing API gateway cho ERP API Hub: JWT, rate limiting, API key auth, transformation | ✅ New |
+| YARP API Gateway | YARP (.NET 9) | Internal gateway cho 1StopShop: JWT, routing, branch_id injection | ✅ Shared với Workspace |
 | ERP API Hub | .NET Core 8 | Business logic, transformation, orchestration | ❌ Dedicated |
 | PostgreSQL | PostgreSQL 18 | Audit logs, system registry, config | ✅ Shared (DB riêng: `erphub_api_db`) |
 | Redis | Redis 7.x | Response cache, rate limit counters, sessions | ✅ Shared (prefix: `erphub:`) |
@@ -128,20 +130,20 @@ The ERP API Hub provides:
 |-------|---------|
 | **Workspace → ERP** | Không trực tiếp. Workspace services gọi ERP qua API Hub nếu cần (tương lai). |
 | **ERP → Workspace** | Không trực tiếp. ERP events qua webhook có thể trigger workspace actions (tương lai). |
-| **Shared Infra** | YARP API Gateway, PostgreSQL, Redis, RabbitMQ, Keycloak — dùng chung, isolate qua routing/database/prefix. |
+| **Shared Infra** | Kong (public), YARP (internal), PostgreSQL, Redis, RabbitMQ, Keycloak — dùng chung, isolate qua routing/database/prefix. |
 | **Module FIN** | Độc lập. API Hub không tương tác với FIN. |
 
 ### 2.4 Data Flow Summary
 
 **Ingestion Flow (External → ERP):**
 ```
-External System → YARP (/api/erp/ingest/*) → API Hub → Validate → Transform 
+External System → Kong (:8000) → API Hub → Validate → Transform 
 → Queue (RabbitMQ: 1stopshop_event_bus) → Worker → ERPNext REST API → MariaDB
 ```
 
 **Query Flow (External ← ERP):**
 ```
-External System → YARP (/api/erp/query/*) → API Hub → Cache Check 
+External System → Kong (:8000) → API Hub → Cache Check 
 → ERPNext API → Cache Store → Response
 ```
 
@@ -211,7 +213,7 @@ The API Hub acts as an **authentication proxy** between external systems and ERP
     CREATE TABLE tenant_registry (
       tenant_id VARCHAR(50) PRIMARY KEY,
       site_name VARCHAR(100) NOT NULL,       -- e.g., "frontend"
-      erpnext_host VARCHAR(255) NOT NULL,    -- e.g., "erpnext-frontend:8000"
+      erpnext_host VARCHAR(255) NOT NULL,    -- e.g., "erpnext-frontend:8080"
       erpnext_api_key_encrypted BYTEA,
       erpnext_api_secret_encrypted BYTEA,
       is_active BOOLEAN DEFAULT true,
@@ -628,7 +630,7 @@ Comprehensive logging of all API Hub activities for security, compliance, and tr
 - **Log Fields:**
   - `log_id` (ULID)
   - `timestamp` (ISO 8601 with timezone)
-  - `request_id` (correlation ID from YARP)
+  - `request_id` (correlation ID from Kong/YARP)
   - `tenant_id` (site identifier)
   - `system_id` (external system identifier)
   - `user_id` (Keycloak user ID)
@@ -735,19 +737,24 @@ Prevent abuse and ensure fair usage across all external systems.
   - `X-RateLimit-Reset`: Unix timestamp when limit resets
   - `Retry-After`: Seconds until next request allowed
 
-#### FR-RLM-005: YARP Integration
-- **Description:** Leverage YARP's rate-limiting plugin where applicable.
+#### FR-RLM-005: Kong Integration
+- **Description:** Leverage Kong's rate-limiting plugin for public-facing API traffic.
 - **Configuration:**
-  - YARP handles edge rate limiting (first line of defense)
-  - API Hub handles application-level rate limiting (granular control)
-  - **DB-less Mode (Current):** YARP config phải qua declarative file (yarp.json). Tier configuration changes require CI/CD pipeline update → redeploy YARP
-  - **DB-backed Mode (Future Option):** Nếu cần dynamic config, migrate sang YARP DB-backed mode để sử dụng Admin API runtime
-- **Sync Process (DB-less):**
+  - **Kong (Public):** Edge rate limiting cho external partners (first line of defense). Kong DB-less mode — config qua declarative file (kong.yml). Tier changes require CI/CD pipeline → redeploy Kong.
+  - **YARP (Internal):** Internal rate limiting cho 1StopShop services (existing, unchanged).
+  - **API Hub:** Application-level rate limiting (granular control per consumer).
+- **Kong Plugins (DB-less):**
+  - `jwt` — Keycloak RS256 token validation
+  - `rate-limiting` — Per-consumer rate limits
+  - `acl` — Consumer group → tier mapping
+  - `request-transformer` — Header injection (X-Request-ID, X-Consumer-ID)
+  - `prometheus` — Metrics export
+- **Sync Process:**
   1. Admin cập nhật tier config trong API Hub UI
-  2. API Hub generates updated `yarp.json` snippet
-  3. Git commit + PR → merge → CI/CD redeploys YARP
-  4. YARP reloads declarative config (zero downtime with kong reload)
-- **Fallback:** If YARP rate limit fails, API Hub applies its own rate limiting
+  2. API Hub generates updated `kong.yml` snippet
+  3. Git commit + PR → merge → CI/CD redeploys Kong
+  4. Kong reloads declarative config (zero downtime)
+- **Fallback:** If Kong rate limit fails, API Hub applies its own rate limiting
 
 ---
 
@@ -1205,9 +1212,10 @@ Các yêu cầu tuân thủ pháp luật Việt Nam cho doanh nghiệp du lịch
 
 | Layer | Cơ chế | Chi tiết |
 |-------|--------|----------|
-| Network | Nginx + Firewall | Chỉ expose YARP API Gateway port 8888 ra ngoài. Internal services (ERPNext, PostgreSQL, RabbitMQ) không có public IP |
+| Network | Nginx + Firewall | Chỉ expose Kong port 8000/8443 ra ngoài cho ERP API Hub. YARP port 8888 cho internal 1StopShop. Internal services (ERPNext, PostgreSQL, RabbitMQ) không có public IP |
 | Transport | TLS 1.3 | HTTPS bắt buộc. HTTP redirect sang HTTPS. HSTS header. Strong cipher suites only |
-| Edge | YARP JWT Plugin | Validate Bearer token trên mọi request. Inject headers: X-User-Id, X-Branch-Id, X-Role. Không cần services gọi lại Keycloak |
+| Edge (Public) | Kong JWT Plugin | Validate Bearer token cho external partners. Rate limiting, API key auth, request transformation |
+| Edge (Internal) | YARP + Keycloak | Validate Bearer token. Inject X-User-Id, X-Branch-Id, X-Role. Không cần services gọi lại Keycloak |
 | App | API Hub Auth Proxy | Map Keycloak token → ERPNext API Key. Validate tenant context per request |
 | Data at rest | AES-256-GCM | ERPNext API secrets encrypted trong PostgreSQL. PII fields encrypted |
 | Data masking | Application layer | Back-stage/external systems không thấy SĐT/email/passport đầy đủ |
@@ -1318,7 +1326,7 @@ Các yêu cầu tuân thủ pháp luật Việt Nam cho doanh nghiệp du lịch
 
 #### Tracing (OpenTelemetry/Jaeger)
 - Distributed tracing across API Hub → ERPNext → Database
-- Trace ID propagation via YARP correlation ID
+- Trace ID propagation via Kong/X-Request-ID (public) + YARP correlation ID (internal)
 - Span tags: tenant_id, system_id, operation, doctype
 
 #### Logging (ELK Stack)
@@ -1424,7 +1432,7 @@ Dựa trên HNH Travel System Architecture Document (HNH-TDD-SA-002), ERP API Hu
 │          └──────────────────────┼────────────────────────────┘                │
 │                                 │                                             │
 │                          ┌──────▼──────┐                                      │
-│                          │ YARP API Gateway │  ← Shared with Workspace             │
+│    Kong (Public:8000)  ←→│ YARP API Gateway │  ← Internal Workspace                 │
 │                          │   3.x       │     JWT Validation                     │
 │                          │ DB-less     │     Rate Limiting                      │
 │                          └──────┬──────┘                                      │
@@ -1455,7 +1463,8 @@ Dựa trên HNH Travel System Architecture Document (HNH-TDD-SA-002), ERP API Hu
 ### 16.2 Nguyên tắc thiết kế
 
 #### SA-001: Tận dụng Infrastructure hiện có
-- **YARP API Gateway:** Dùng ch YARP (.NET 9) đang chạy ((.NET 9)). Thêm route `/api/erp/*` → ERP API Hub.
+- **Kong API Gateway:** Kong 3.x DB-less cho public-facing ERP API Hub. JWT, rate limiting, API key auth, request transformation qua plugins.
+- **YARP (.NET 9):** Internal gateway cho 1StopShop (unchanged). Route `/api/erp/*` → ERP API Hub cho internal traffic.
 - **Keycloak:** Dùng shared realm `HNHTravel-SGN`. Thêm roles `api-hub:read`, `api-hub:write`, `api-hub:admin`, `api-hub:webhook`.
 - **PostgreSQL 18:** Dùng shared instance (separate database `erphub_api_db`).
 - **Redis 7:** Dùng shared instance (separate key prefix `erphub:`).
@@ -1472,7 +1481,7 @@ Dựa trên HNH Travel System Architecture Document (HNH-TDD-SA-002), ERP API Hu
 
 #### SA-004: Auth Proxy Pattern (Option C)
 ```
-External System ──► YARP (JWT validate) ──► API Hub (map to ERPNext API Key)
+External System ──► Kong (:8000, JWT validate) ──► API Hub ──► ERPNext
                                                   │
                                                   ▼
                                             ERPNext REST API
@@ -1491,15 +1500,17 @@ External System ──► YARP (JWT validate) ──► API Hub (map to ERPNext 
 | Database | PostgreSQL 18 (shared) | Infrastructure hiện có; audit logs, config, registry |
 | Cache | Redis 7 (shared, prefix `erphub:`) | Response caching, rate limit counters, session store |
 | Message Queue | RabbitMQ 3.12 (exchange `1stopshop_event_bus`) | Async ingestion; cách ly khỏi workspace events |
-| API Gateway | YARP (.NET 9) (DB-less) | Existing; JWT validation; rate limiting |
+| API Gateway (Public) | Kong 3.x (DB-less) | JWT, rate limiting, API key auth, transformation |
+| API Gateway (Internal) | YARP (.NET 9) | Existing; JWT validation; routing; branch_id injection |
 | Identity | Keycloak (shared realm `HNHTravel-SGN`) | Single sign-on; existing realm configuration |
 | ERP Backend | ERPNext v15 (Frappe Framework) | Existing system; REST API tại `/api/resource/{Doctype}` |
 
-### 16.4 YARP Routing Configuration
+### 16.4 Kong & YARP Routing Configuration
 
-Thêm vào `yarp.json` declarative config:
+#### Kong (Public) — `kong.yml`
 
 ```yaml
+# Kong DB-less declarative config cho public-facing ERP API Hub
 services:
   - name: erp-api-hub
     url: http://erp-api-hub:8008
@@ -1538,6 +1549,29 @@ services:
           - /internal/erp
         strip_path: true
     plugins: []  # No JWT for internal webhook callbacks from ERPNext
+```
+
+#### YARP (Internal) — `yarp.json`
+
+```json
+{
+  "ReverseProxy": {
+    "Routes": {
+      "erp-api": {
+        "ClusterId": "erp-api-hub",
+        "Match": { "Path": "/api/erp/{**catch-all}" },
+        "Transforms": [{ "PathRemovePrefix": "/api/erp" }]
+      }
+    },
+    "Clusters": {
+      "erp-api-hub": {
+        "Destinations": {
+          "destination1": { "Address": "http://erp-api-hub:8008" }
+        }
+      }
+    }
+  }
+}
 ```
 
 ### 16.5 Keycloak Realm Configuration — Bổ sung
@@ -1599,8 +1633,8 @@ Exchange: 1stopshop_event_bus (topic, durable)
 │                     DOCKER HOST (On-premise)                  │
 │                                                               │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐   │
-│  │   Nginx     │  │   YARP      │  │   ERP API Hub       │   │
-│  │   (443)     │──│   (8000)    │──│   (.NET Core 8)     │   │
+│  │   Nginx     │  │ Kong (Public)│  │   ERP API Hub       │   │
+│  │   (443)     │──│  (:8000)    │──│   (.NET 9)          │   │
 │  │             │  │  DB-less    │  │   Port: 8008        │   │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘   │
 │         │                │                  │                 │
@@ -1647,7 +1681,8 @@ Exchange: 1stopshop_event_bus (topic, durable)
 |-------|--------|----------|
 | Network | Nginx + Firewall | Chỉ expose YARP API Gateway port 8888 ra ngoài. ERPNext internal (no public IP) |
 | Transport | TLS 1.3 | HTTPS bắt buộc. HSTS header |
-| Edge | YARP JWT Plugin | Validate Bearer token. Inject X-User-Id, X-Branch-Id headers |
+| Edge (Public) | Kong JWT Plugin | Validate Bearer token cho external partners |
+| Edge (Internal) | YARP + Keycloak | Validate Bearer token. Inject X-User-Id, X-Branch-Id, X-Role |
 | App | API Hub Auth | Map Keycloak token → ERPNext API Key. Validate tenant context |
 | Data at rest | AES-256-GCM | ERPNext API secrets encrypted in PostgreSQL |
 | Audit | Structured logs | JSON format, correlation ID, PII masking |

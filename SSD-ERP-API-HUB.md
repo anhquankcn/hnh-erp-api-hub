@@ -33,16 +33,18 @@ ERP API Hub là service riêng biệt, chạy song song với các microservice 
 
 | Boundary | Direction | Protocol | Auth |
 |----------|-----------|----------|------|
-| External → YARP → API Hub → ERPNext | Inbound (Ingestion) | HTTPS + REST | Keycloak JWT |
-| External → YARP → API Hub ← ERPNext | Outbound (Query) | HTTPS + REST | Keycloak JWT |
+| External → Kong → API Hub → ERPNext | Inbound (Ingestion) | HTTPS + REST | Keycloak JWT + Kong |
+| External → Kong → API Hub ← ERPNext | Outbound (Query) | HTTPS + REST | Keycloak JWT + Kong |
 | 1StopShop → RabbitMQ → API Hub → ERPNext | Event-driven | AMQP | RabbitMQ |
 | ERPNext → API Hub → External | Webhook | HTTPS + HMAC | HMAC-SHA256 |
-| API Hub → YARP → 1StopShop | Sync API | HTTPS + REST | Service Account JWT |
+| API Hub → YARP → 1StopShop | Sync API (internal) | HTTPS + REST | Service Account JWT |
+| ERPNext → Kong → External | Webhook (outbound) | HTTPS + HMAC | HMAC-SHA256 |
 
 ### 1.3 Service Inventory
 
 | Service | Port | Role | DB |
 |---------|------|------|-----|
+| kong | 8000 | Public API Gateway: JWT, rate limiting, API key auth, transformation | — |
 | erp-api-hub | 8008 | API endpoints, auth proxy, field mapping | erphub_api_db |
 | erp-worker | 8009 | RabbitMQ consumer, background processing | erphub_api_db |
 
@@ -60,7 +62,7 @@ ERP API Hub là service riêng biệt, chạy song song với các microservice 
 | **Description** | Validate JWT tokens issued by Keycloak shared realm `HNHTravel-SGN` |
 | **Endpoint** | `https://quanna.tail072b2f.ts.net:8443/realms/HNHTravel-SGN` |
 | **Algorithm** | RS256 (validate via JWKS, **không share secret**) |
-| **Process** | 1. Extract Bearer token from Authorization header 2. Validate signature using JWKS endpoint 3. Validate expiry (exp claim) 4. Validate issuer (iss = realm URL) 5. Validate audience (aud includes `1stopshop-api`) 6. Extract claims: sub, preferred_username, email, realm_access.roles[], BranchId, DepartmentId, TeamId |
+| **Process** | 1. Kong validates JWT (RS256 via JWKS) on inbound request 2. API Hub extracts claims from validated token 3. Validate expiry (exp claim) 4. Validate issuer (iss = realm URL) 5. Validate audience (aud includes `1stopshop-api`) 6. Extract claims: sub, preferred_username, email, realm_access.roles[], BranchId, DepartmentId, TeamId |
 | **Error Cases** | E1: Token expired → 401 Unauthorized + refresh hint E2: Invalid signature → 401 Unauthorized E3: Wrong audience → 403 Forbidden E4: Missing BranchId claim → 403 Forbidden |
 | **Performance** | < 5ms per validation (JWKS cached) |
 
@@ -174,7 +176,9 @@ ERP API Hub là service riêng biệt, chạy song song với các microservice 
 | **Queues** | `erphub.ingestion.customer.created`, `erphub.ingestion.sales_invoice.posted`, `erphub.ingestion.payment.confirmed` |
 | **Process** | 1. Consume event envelope (eventId, eventType, source, timestamp, version, payload) 2. Dedupe using `eventId` (table `erp_processed_events`) 3. Transform payload using field mapping 4. Call ERPNext REST API 5. On business error → DLQ `erphub.dlq.ingestion` + Prometheus alert |
 | **Error Handling** | Retry 3x with exponential backoff (1s, 5s, 30s). DLQ after max retries. |
-| **Critical** | **Dùng exchange chung `1stopshop_event_bus`. Không tạo exchange riêng.** |
+| **Critical** | **Dùng exchange chung `1stopshop_event_bus`. Không tạo exchange riêng.**
+
+**Kong là public-facing gateway. YARP là internal gateway. Không nhầm lẫn.** |
 
 ### SYS-WBHK-001: Webhook Registration
 
@@ -204,7 +208,7 @@ ERP API Hub là service riêng biệt, chạy song song với các microservice 
 | SYS-RLM-002 | TIER_2 | 1 second | 50 requests |
 | SYS-RLM-003 | TIER_3 | 1 second | 200 requests |
 | SYS-RLM-004 | Burst protection | 1 minute | 10x tier limit |
-| SYS-RLM-005 | YARP integration | Config | YARP handles edge rate limiting |
+| SYS-RLM-005 | Kong rate limiting | Config | Kong handles public-facing rate limiting (DB-less mode) |
 
 ### SYS-LOG-001: Audit Logging
 
@@ -283,9 +287,9 @@ ERP API Hub là service riêng biệt, chạy song song với các microservice 
 ### 5.1 REST API Base URL
 
 ```
-Production: https://api.hnhtravel.work/api/erp/v1
+Production: https://api.hnhtravel.work/api/erp/v1 (via Kong :8000)
 Staging:    https://erp.hnhtravel.work/api/erp/v1
-Internal:   http://erp-api-hub:8008
+Internal:   http://erp-api-hub:8008 (via YARP :8888)
 ```
 
 ### 5.2 Common Headers

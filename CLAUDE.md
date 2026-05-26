@@ -11,13 +11,15 @@
 
 - **Vai trò:** Service riêng, chạy song song với các microservice hiện có
 - **Port:** 8008 (API Hub), 8009 (Worker)
-- **Gateway:** YARP API Gateway (.NET 9) trên port 8888
+- **Public Gateway:** Kong 3.x (DB-less) trên port 8000 — cho ERP API Hub
+- **Internal Gateway:** YARP (.NET 9) trên port 8888 — cho hệ 1StopShop
 - **ERP Backend:** ERPNext v15
 
 ### Chiều tích hợp
 
-1. **Inbound (Ingestion):** External system → YARP → API Hub → ERPNext (ghi dữ liệu)
-2. **Outbound (Query):** External system → YARP → API Hub → ERPNext (đọc dữ liệu)
+1. **Inbound (Ingestion):** External system → **Kong** → API Hub → ERPNext (ghi dữ liệu)
+2. **Outbound (Query):** External system → **Kong** → API Hub ← ERPNext (đọc dữ liệu)
+3. **Internal:** 1StopShop → **YARP** → API Hub → ERPNext
 3. **Event (RabbitMQ):** 1StopShop services publish event → API Hub consume → ghi vào ERPNext
 4. **Webhook (Outbound):** ERPNext event → API Hub → external systems
 
@@ -33,7 +35,8 @@
 | Database | PostgreSQL | 18 | Port 5452 (dev) |
 | Cache | Redis | 7.x | Prefix: `erphub:` |
 | Message Queue | RabbitMQ | 3.12 | Exchange: `1stopshop_event_bus` |
-| API Gateway | YARP | .NET 9 | Port 8888 |
+| API Gateway (Public) | Kong | 3.x (DB-less) | Port 8000 |
+| API Gateway (Internal) | YARP | .NET 9 | Port 8888 |
 | Identity | Keycloak | (shared) | Realm: `HNHTravel-SGN` |
 | ERP Backend | ERPNext / Frappe | v15 | |
 | Logging | Serilog | latest | Structured JSON |
@@ -102,16 +105,27 @@ Routing key format: `{service}.{entity}.{action}` (snake_case)
 ❌ erp.Ingestion.Customer.Created (PascalCase — sai format)
 ```
 
-### 3.6 API Hub Placement: TRƯỚC Gateway (cho traffic ngoại)
+### 3.6 Dual Gateway Architecture
 
 ```
-✅ External → API Hub → YARP Gateway → microservices
-✅ Internal → YARP Gateway → API Hub → ERPNext
+✅ External → Kong (:8000) → API Hub → ERPNext (public traffic)
+✅ Internal → YARP (:8888) → API Hub → ERPNext (internal traffic)
+✅ 1StopShop → YARP (:8888) → Core/CRM/Ticketing (unchanged)
 
 ❌ Frontend → BFF → API Hub → YARP → microservices (sẽ phá session)
 ```
 
-### 3.7 Cross-DB Query: CẤM
+### 3.7 Kong là Public Gateway, YARP là Internal Gateway
+
+```
+✅ Kong (:8000) → API Hub → ERPNext (external partners, API key auth, rate limiting)
+✅ YARP (:8888) → API Hub → ERPNext (internal 1StopShop, JWT auth)
+
+❌ Kong cho internal traffic (overhead không cần thiết)
+❌ YARP cho public API traffic (thiếu API management features)
+```
+
+### 3.8 Cross-DB Query: CẤM
 
 ```sql
 -- ❌ SAI — tuyệt đối không cross-database query
@@ -119,7 +133,8 @@ SELECT * FROM 1stopshop_core_db.customers c
 JOIN erphub_api_db.external_systems e ON c.id = e.customer_id
 
 -- ✅ ĐÚNG — gọi API hoặc consume event
-// Gọi: GET https://gateway:8888/v1/customers/{customerId}
+// Internal: GET https://gateway:8888/v1/customers/{customerId} (via YARP)
+// External: GET https://api.hnhtravel.work/api/erp/v1/... (via Kong)
 // Hoặc: consume event payment.confirmed từ 1stopshop_event_bus
 ```
 
@@ -188,6 +203,22 @@ Endpoint: https://quanna.tail072b2f.ts.net:8443/realms/HNHTravel-SGN
 JWT Algorithm: RS256 (validate via JWKS)
 Client ID: hnh-erp-hub
 Audience: 1stopshop-api
+
+### Kong JWT Plugin Config
+```
+kong.yml:
+  plugins:
+    - name: jwt
+      config:
+        uri_param_names: [jwt]
+        claims_to_verify: [exp]
+        key_claim_name: iss
+        secret_is_base64: false
+        anonymous: false
+  consumers:
+    - username: erp-api-hub
+      jwt_secret: (from Keycloak RS256 JWKS)
+```
 Token Lifetime: 8 hours
 Refresh Token: 24 hours
 
@@ -266,7 +297,7 @@ Bắt buộc:
 3. **Đừng tin client gửi branch_id** — Lấy từ JWT claim `BranchId`.
 4. **Đừng hard delete** — Dùng `deleted_at` soft delete.
 5. **Đừng cross-DB query** — Gọi API hoặc consume event.
-6. **Đừng gọi microservice trực tiếp** — Gọi qua YARP Gateway port 8888.
+6. **Đừng gọi microservice trực tiếp** — Internal qua YARP :8888, public qua Kong :8000.
 7. **Đừng quên X-Request-ID** — Mọi mutation phải có correlation ID.
 8. **Đừng cache PII** — Trừ khi đã mask theo role-based masking rules.
 9. **Đừng retry 4xx** — Chỉ retry 5xx/timeout với exponential backoff.
