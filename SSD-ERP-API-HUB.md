@@ -51,8 +51,12 @@ Service đóng vai trò cầu nối giữa:
 | Service | Port | Role | DB |
 |---------|------|------|-----|
 | kong | 8000 | Public API Gateway: JWT, rate limiting, API key auth, transformation | — |
+| yarp | 8888 | Internal API Gateway: service routing, branch_id injection | — |
 | erp-api-hub | 8008 | API endpoints, auth proxy, field mapping | erphub_api_db |
 | erp-worker | 8009 | RabbitMQ consumer, background processing | erphub_api_db |
+| redis | 6379 | Cache, idempotency, token cache, rate limit counters | — |
+
+**Version Pinning:** Kong MUST run `kong:3.9` in all environments.
 
 ---
 
@@ -171,6 +175,19 @@ Service đóng vai trò cầu nối giữa:
 | **Body** | `{ "filters": {}, "group_by": ["field1"], "aggregations": [{"field": "total", "function": "sum"}] }` |
 | **Process** | 1. Validate auth + tenant 2. Check Redis cache 3. Call ERPNext report API 4. Cache result (10 min TTL for aggregates) 5. Return aggregated data |
 
+### SYS-FMAP-001: Field Mapping Transformation Engine
+
+| Field | Value |
+|-------|-------|
+| **ID** | SYS-FMAP-001 |
+| **Name** | Field Mapping Transformation Engine |
+| **Source FR** | FR-FMAP-001 |
+| **Description** | Transform external payload fields into ERPNext doctype fields using configured `field_mappings` |
+| **Input** | External payload, system_id, doctype, tenant context |
+| **Process** | 1. Load active mappings by system_id + doctype 2. Rename direct fields 3. Apply lookup mappings 4. Apply allowed transform rules 5. Reject unmapped required ERPNext fields 6. Return normalized ERPNext payload |
+| **Security** | Transform rules are allowlisted; no arbitrary code execution in request path |
+| **Error Cases** | E1: Missing required mapping → 422 Unprocessable Entity E2: Lookup not found → 422 Unprocessable Entity E3: Transform rule failure → 422 Unprocessable Entity |
+
 ### SYS-EVT-001: Event Consumption (RabbitMQ)
 
 | Field | Value |
@@ -249,9 +266,13 @@ Service đóng vai trò cầu nối giữa:
 | NFR-013 | Data | ULID IDs | 26 ký tự, sortable theo thời gian |
 | NFR-014 | Data | Multi-tenant | branch_id từ JWT, không tin client |
 | NFR-015 | Data | Audit | created_at/by, updated_at/by trên mọi bảng |
-| NFR-016 | Data | Timestamp | TIMESTAMPTZ, lưu UTC+7, compare normalize |
+| NFR-016 | Data | Timestamp | TIMESTAMPTZ stored UTC by PostgreSQL, display in UTC+7 at application layer |
 | NFR-017 | Integration | No cross-DB query | Gọi API hoặc consume event |
 | NFR-018 | Integration | Shared RabbitMQ | Exchange `1stopshop_event_bus`, không tạo riêng |
+| NFR-019 | Resilience | Recovery Time Objective (RTO) | ≤ 15 minutes |
+| NFR-020 | Resilience | Recovery Point Objective (RPO) | ≤ 5 minutes |
+| NFR-021 | Performance | Event processing latency | ≤ 500ms P95 from consume to enqueue/call |
+| NFR-022 | Integration | Webhook timeout per attempt | 10 seconds |
 
 ---
 
@@ -284,7 +305,7 @@ Service đóng vai trò cầu nối giữa:
 | webhook_deliveries | Webhook delivery log | delivery_id, subscription_id, status, http_status, attempted_at |
 | audit_logs | Audit trail | log_id, request_id, tenant_id, method, endpoint, status_code |
 | field_mappings | Field transform | mapping_id, system_id, external_field, erpnext_field, transform_script |
-| erp_processed_events | Event dedupe | event_id (ULID), source, event_type, processed_at |
+| erp_processed_events | Event dedupe | erp_processed_event_id (ULID), source, event_type, processed_at |
 
 ---
 
@@ -330,6 +351,7 @@ Internal:   http://erp-api-hub:8008 (via YARP :8888)
 
 ```json
 {
+  "success": false,
   "error": {
     "code": "VALIDATION_FAILED",
     "message": "The request body contains validation errors",
@@ -405,123 +427,253 @@ Internal:   http://erp-api-hub:8008 (via YARP :8888)
 
 ### 7.1 Auth Test Cases
 
-#### TC-AUTH-001: Valid JWT → 200 OK
+```gherkin
+Feature: Authentication and tenant context
 
-```
-GIVEN: Valid Keycloak JWT with BranchId claim
-WHEN: GET /api/erp/v1/query/Customer?page=1&pageSize=10
-THEN: Response 200 OK with data
-AND: Response contains X-Request-ID header
-```
+  Scenario: TC-AUTH-001 Valid JWT returns 200 OK
+    Given a valid Keycloak JWT with BranchId claim
+    When the client sends GET /api/erp/v1/query/Customer?page=1&pageSize=10
+    Then the response status is 200 OK
+    And the response contains data
+    And the response contains X-Request-ID header
 
-#### TC-AUTH-002: Expired JWT → 401 Unauthorized
+  Scenario: TC-AUTH-002 Expired JWT returns 401 Unauthorized
+    Given an expired Keycloak JWT
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 401 Unauthorized
+    And the error body contains a refresh hint
 
-```
-GIVEN: Expired Keycloak JWT
-WHEN: GET /api/erp/v1/query/Customer
-THEN: Response 401 Unauthorized
-AND: Error body contains refresh hint
-```
+  Scenario: TC-AUTH-003 Invalid signature returns 401 Unauthorized
+    Given a JWT with a tampered signature
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 401 Unauthorized
+    And the error body contains "Invalid token signature"
 
-#### TC-AUTH-003: Invalid Signature → 401 Unauthorized
+  Scenario: TC-AUTH-004 Wrong audience returns 403 Forbidden
+    Given a valid JWT with aud not equal to "1stopshop-api"
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 403 Forbidden
+    And the error body contains "Invalid audience"
 
-```
-GIVEN: JWT with tampered signature
-WHEN: GET /api/erp/v1/query/Customer
-THEN: Response 401 Unauthorized
-AND: Error body: "Invalid token signature"
-```
+  Scenario: TC-AUTH-005 Token exchange returns ERPNext session
+    Given a valid Keycloak JWT and active api_key_mapping record
+    When the client sends POST /api/erp/v1/auth/token
+    Then the response status is 200 OK
+    And the response contains an ERPNext session token
 
-#### TC-AUTH-004: Wrong Audience → 403 Forbidden
+  Scenario: TC-AUTH-006 Missing token mapping returns 403 Forbidden
+    Given a valid Keycloak JWT with no api_key_mapping record
+    When the client sends POST /api/erp/v1/auth/token
+    Then the response status is 403 Forbidden
+    And the error body contains "No mapping found"
 
-```
-GIVEN: Valid JWT but aud != "1stopshop-api"
-WHEN: GET /api/erp/v1/query/Customer
-THEN: Response 403 Forbidden
-AND: Error body: "Invalid audience"
-```
+  Scenario: TC-AUTH-007 Valid API key returns 200 OK
+    Given a valid X-API-Key, X-Timestamp, and X-Signature
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 200 OK
 
-#### TC-AUTH-010: Missing BranchId Claim → 403 Forbidden
+  Scenario: TC-AUTH-008 Expired API timestamp returns 401 Unauthorized
+    Given a valid X-API-Key and a timestamp older than 5 minutes
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 401 Unauthorized
+    And the error body contains "Expired timestamp"
 
-```
-GIVEN: Valid JWT but no BranchId claim
-WHEN: GET /api/erp/v1/query/Customer
-THEN: Response 403 Forbidden
-AND: Error body: "Missing tenant context"
+  Scenario: TC-AUTH-009 HMAC mismatch returns 401 Unauthorized
+    Given a valid X-API-Key and a mismatched X-Signature
+    When the client sends POST /api/erp/v1/ingest/Customer
+    Then the response status is 401 Unauthorized
+    And the error body contains "Signature mismatch"
+
+  Scenario: TC-AUTH-010 Missing BranchId claim returns 403 Forbidden
+    Given a valid JWT without BranchId claim
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 403 Forbidden
+    And the error body contains "Missing tenant context"
+
+  Scenario: TC-AUTH-011 Inactive tenant returns 403 Forbidden
+    Given a valid JWT with BranchId for an inactive tenant
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 403 Forbidden
+    And the error body contains "Tenant inactive"
 ```
 
 ### 7.2 Ingestion Test Cases
 
-#### TC-ING-001: Valid Ingestion → 202 Accepted
+```gherkin
+Feature: Document ingestion
 
-```
-GIVEN: Valid JWT + valid doctype + valid payload
-WHEN: POST /api/erp/v1/ingest/Customer
-  Body: { "customer_name": "Test", "customer_type": "Individual" }
-  Headers: X-Idempotency-Key: 01ARZ3NDEKTSV4RRFFQ69G5FAV
-THEN: Response 202 Accepted
-AND: Body contains job_id (ULID)
-AND: Event published to RabbitMQ
-```
+  Scenario: TC-ING-001 Valid ingestion returns 202 Accepted
+    Given a valid JWT, valid doctype, valid payload, and X-Idempotency-Key
+    When the client sends POST /api/erp/v1/ingest/Customer
+    Then the response status is 202 Accepted
+    And the body contains job_id as ULID
+    And an event is published to RabbitMQ
 
-#### TC-ING-003: Duplicate Idempotency Key → 200 OK
+  Scenario: TC-ING-002 Invalid doctype returns 400 Bad Request
+    Given a valid JWT and a disallowed doctype
+    When the client sends POST /api/erp/v1/ingest/InvalidDoctype
+    Then the response status is 400 Bad Request
+    And the error body contains "Invalid doctype"
 
-```
-GIVEN: Same X-Idempotency-Key used within 5 minutes
-WHEN: POST /api/erp/v1/ingest/Customer (same key)
-THEN: Response 200 OK
-AND: Body contains cached response (no duplicate processing)
+  Scenario: TC-ING-003 Duplicate idempotency key returns cached 200 OK
+    Given the same X-Idempotency-Key was used within 5 minutes
+    When the client sends POST /api/erp/v1/ingest/Customer with the same key
+    Then the response status is 200 OK
+    And the body contains the cached response
+    And no duplicate event is published
+
+  Scenario: TC-ING-004 Rate limit exceeded returns 429 Too Many Requests
+    Given a client has exceeded its configured rate limit
+    When the client sends POST /api/erp/v1/ingest/Customer
+    Then the response status is 429 Too Many Requests
+    And the error body contains "Rate limit exceeded"
+
+  Scenario: TC-ING-005 Batch 50 items returns 202 Accepted
+    Given a valid JWT and a batch payload with 50 valid items
+    When the client sends POST /api/erp/v1/ingest/Customer/batch
+    Then the response status is 202 Accepted
+    And the body contains batch_id
+    And the body contains per-item statuses
+
+  Scenario: TC-ING-006 Batch above 100 items returns 400 Bad Request
+    Given a valid JWT and a batch payload with 101 items
+    When the client sends POST /api/erp/v1/ingest/Customer/batch
+    Then the response status is 400 Bad Request
+    And the error body contains "Max 100 items"
+
+  Scenario: TC-ING-007 Batch above 1MB returns 413 Payload Too Large
+    Given a valid JWT and a batch payload larger than 1MB
+    When the client sends POST /api/erp/v1/ingest/Customer/batch
+    Then the response status is 413 Payload Too Large
+    And the error body contains "Payload too large"
 ```
 
 ### 7.3 Query Test Cases
 
-#### TC-QRY-001: List with Pagination → 200 OK
+```gherkin
+Feature: Document query
 
-```
-GIVEN: Valid JWT + valid doctype
-WHEN: GET /api/erp/v1/query/Customer?page=2&pageSize=20
-THEN: Response 200 OK
-AND: Body contains items[], meta.page=2, meta.page_size=20
-AND: meta.total_count > 0
-```
+  Scenario: TC-QRY-001 List with pagination returns 200 OK
+    Given a valid JWT and valid doctype
+    When the client sends GET /api/erp/v1/query/Customer?page=2&pageSize=20
+    Then the response status is 200 OK
+    And the body contains items
+    And meta.page equals 2
+    And meta.page_size equals 20
 
-#### TC-QRY-002: Cache Hit → < 50ms
+  Scenario: TC-QRY-002 Cache hit returns within 50ms
+    Given the same query was requested within the 5 minute cache TTL
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 200 OK
+    And the response time is less than 50ms at P95
+    And a Redis cache hit is recorded
 
-```
-GIVEN: Same query requested within cache TTL (5 min)
-WHEN: GET /api/erp/v1/query/Customer (second request)
-THEN: Response time < 50ms (P95)
-AND: Redis hit recorded in logs
+  Scenario: TC-QRY-003 ERPNext down returns 502 Bad Gateway
+    Given ERPNext is unavailable
+    When the client sends GET /api/erp/v1/query/Customer
+    Then the response status is 502 Bad Gateway
+    And the error body contains "ERPNext unavailable"
+
+  Scenario: TC-QRY-004 Single document returns 200 OK
+    Given a valid JWT and an existing Customer document
+    When the client sends GET /api/erp/v1/query/Customer/CUST-0001
+    Then the response status is 200 OK
+    And the body contains the Customer document
+
+  Scenario: TC-QRY-005 Missing document returns 404 Not Found
+    Given a valid JWT and a non-existing Customer document
+    When the client sends GET /api/erp/v1/query/Customer/CUST-MISSING
+    Then the response status is 404 Not Found
+    And the error body contains "Document not found"
+
+  Scenario: TC-QRY-006 Aggregate query returns 200 OK
+    Given a valid JWT and a valid aggregation request
+    When the client sends POST /api/erp/v1/query/SalesInvoice/aggregate
+    Then the response status is 200 OK
+    And the body contains aggregated data
 ```
 
 ### 7.4 Event Test Cases
 
-#### TC-EVT-001: Event Consume → ERPNext Updated
+```gherkin
+Feature: Event processing
 
-```
-GIVEN: Event published to 1stopshop_event_bus with routing key payment.confirmed
-WHEN: erp-worker consumes event
-THEN: Event processed successfully
-AND: ERPNext Sales Invoice status updated
-AND: erp_processed_events table has record with eventId
+  Scenario: TC-EVT-001 Event consume updates ERPNext
+    Given an event is published to 1stopshop_event_bus with routing key payment.confirmed
+    When erp-worker consumes the event
+    Then the event is processed successfully
+    And ERPNext Sales Invoice status is updated
+    And erp_processed_events has a record with erp_processed_event_id
+
+  Scenario: TC-EVT-002 Duplicate event is skipped
+    Given the same eventId is received twice
+    When erp-worker processes the second event
+    Then the event is skipped by dedupe
+    And no duplicate data is created in ERPNext
+
+  Scenario: TC-EVT-003 Business error routes to DLQ
+    Given an event contains invalid business data
+    When erp-worker processing fails after 3 retries
+    Then the event is routed to DLQ erphub.dlq.ingestion
+    And a Prometheus alert is fired
 ```
 
-#### TC-EVT-002: Duplicate Event → Skip
+### 7.5 Webhook Test Cases
 
-```
-GIVEN: Same eventId received twice
-WHEN: erp-worker processes second event
-THEN: Event skipped (dedupe via erp_processed_events)
-AND: No duplicate data in ERPNext
+```gherkin
+Feature: Webhooks
+
+  Scenario: TC-WBHK-001 Register webhook returns 201 Created
+    Given a valid admin JWT and HTTPS webhook URL
+    When the client sends POST /api/erp/v1/webhooks/subscriptions
+    Then the response status is 201 Created
+    And the subscription is stored with encrypted secret
+
+  Scenario: TC-WBHK-002 Deliver webhook returns 200 OK
+    Given an active webhook subscription for the ERPNext event
+    When API Hub delivers the webhook to the subscriber
+    Then the subscriber returns 200 OK
+    And webhook_deliveries records status "success"
+
+  Scenario: TC-WBHK-003 HMAC verification passes
+    Given a webhook payload signed with the subscription secret
+    When the subscriber verifies X-ERP-Signature
+    Then the signature verification passes
+    And the payload is accepted
 ```
 
-#### TC-EVT-003: Business Error → DLQ
+### 7.6 Rate Limit Test Cases
 
+```gherkin
+Feature: Rate limiting
+
+  Scenario: TC-RLM-001 TIER_1 limit returns 429 after 10 requests per second
+    Given a TIER_1 client has sent 10 requests within 1 second
+    When the client sends the next request in the same window
+    Then the response status is 429 Too Many Requests
+
+  Scenario: TC-RLM-002 TIER_2 limit returns 429 after 50 requests per second
+    Given a TIER_2 client has sent 50 requests within 1 second
+    When the client sends the next request in the same window
+    Then the response status is 429 Too Many Requests
+
+  Scenario: TC-RLM-003 TIER_3 limit returns 429 after 200 requests per second
+    Given a TIER_3 client has sent 200 requests within 1 second
+    When the client sends the next request in the same window
+    Then the response status is 429 Too Many Requests
 ```
-GIVEN: Event with invalid business data
-WHEN: erp-worker processing fails after 3 retries
-THEN: Event routed to DLQ erphub.dlq.ingestion
-AND: Prometheus alert fired
+
+### 7.7 Logging Test Cases
+
+```gherkin
+Feature: Audit logging
+
+  Scenario: TC-LOG-001 Every request is written to audit_logs
+    Given any authenticated request with X-Request-ID
+    When API Hub completes the request
+    Then audit_logs contains one record for the request
+    And request_id is stored as a 26 character ULID
+    And tenant_id, method, endpoint, status_code, and created_at are populated
 ```
 
 ---

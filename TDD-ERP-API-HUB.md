@@ -55,6 +55,7 @@ TDD này mô tả chi tiết kỹ thuật để implement ERP API Hub dựa trê
 | Logging | Serilog | latest |
 | Metrics | Prometheus.Client | latest |
 | Testing | xUnit + TestContainers | latest |
+| ID Generation | NetUlid | latest |
 
 ---
 
@@ -105,7 +106,7 @@ TDD này mô tả chi tiết kỹ thuật để implement ERP API Hub dựa trê
 | Service | Port | Responsibility | DB |
 |---------|------|---------------|-----|
 | erp-api-hub | 8008 | Ingestion, Query, Webhook, Auth Proxy | erphub_api_db |
-| erp-worker | 8009 | Background consumers (RabbitMQ) | erphub_api_db |
+| erp-worker | 8009 | Background consumers (RabbitMQ); internal-only health/metrics port, not exposed publicly | erphub_api_db |
 
 ### 2.3 Ports & Hostnames (Dev)
 
@@ -115,7 +116,7 @@ BFF                 : 8090
 Kong API Gateway    : 8000 (public, DB-less)
 YARP API Gateway    : 8888 (internal)
 erp-api-hub        : 8008
-erp-worker          : 8009
+erp-worker          : 8009 (internal only; no host port publish)
 CoreService         : 8001
 CrmService          : 8002
 TicketingService    : 8003
@@ -123,7 +124,7 @@ QuotationService    : 8004
 PaymentService      : 8005
 KpiService          : 8006
 NotificationService : 8007
-PostgreSQL          : 5452
+PostgreSQL          : 5452 (external/host) → 5432 (internal Docker)
 RabbitMQ            : 5672 / 15672
 Redis               : 6379
 Keycloak            : https://quanna.tail072b2f.ts.net:8443
@@ -252,8 +253,8 @@ CREATE TABLE webhook_subscriptions (
 #### audit_logs
 ```sql
 CREATE TABLE audit_logs (
-    log_id VARCHAR(26) PRIMARY KEY,
-    request_id VARCHAR(100),
+    log_id VARCHAR(26) NOT NULL,
+    request_id VARCHAR(26),
     tenant_id VARCHAR(26) NOT NULL,
     system_id VARCHAR(26) REFERENCES external_systems(system_id),
     user_id VARCHAR(255),
@@ -265,8 +266,9 @@ CREATE TABLE audit_logs (
     response_size_bytes INTEGER,
     client_ip INET,
     user_agent TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (log_id, created_at)
+) PARTITION BY RANGE (created_at);
 CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at);
 CREATE INDEX idx_audit_logs_tenant ON audit_logs(tenant_id);
 CREATE INDEX idx_audit_logs_system ON audit_logs(system_id);
@@ -283,9 +285,9 @@ CREATE INDEX idx_api_key_mapping_user ON api_key_mapping(keycloak_user_id);
 CREATE INDEX idx_webhook_sub_system ON webhook_subscriptions(system_id);
 CREATE INDEX idx_field_mappings_system ON field_mappings(system_id);
 
--- Partitioning: audit_logs by month (optional for scale)
--- CREATE TABLE audit_logs_2026_05 PARTITION OF audit_logs
---     FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
+-- Mandatory partitioning: audit_logs by month
+CREATE TABLE audit_logs_2026_05 PARTITION OF audit_logs
+    FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
 ```
 
 ---
@@ -424,6 +426,13 @@ components:
           type: integer
 ```
 
+### 4.1.1 API Versioning & Gateway Path Handling
+
+- Public route: Kong receives `/api/erp/v1/...`, matches `/api/erp`, and uses `strip_path: true`.
+- Internal route: YARP receives `/api/erp/v1/...` and removes `/api/erp` with `PathRemovePrefix`.
+- Application route map: ASP.NET Core Minimal API MUST map versioned routes with `/v1/...` prefixes (for example `MapPost("/v1/ingest/{doctype}", ...)`, `MapGet("/v1/query/{doctype}", ...)`).
+- Do not duplicate `/api/erp` inside the .NET route map; that prefix belongs to Kong/YARP only.
+
 ### 4.2 Error Response Format
 
 ```json
@@ -455,7 +464,7 @@ version: '3.8'
 
 services:
   kong:
-    image: kong:3.6
+    image: kong:3.9
     environment:
       - KONG_DATABASE=off
       - KONG_DECLARATIVE_CONFIG=/etc/kong/kong.yml
@@ -486,6 +495,7 @@ services:
       - RabbitMQ__Host=rabbitmq
       - RabbitMQ__Username=${RABBIT_USER}
       - RabbitMQ__Password=${RABBIT_PASS}
+      - RABBITMQ_EXCHANGE_NAME=1stopshop_event_bus
       - Keycloak__RealmUrl=https://quanna.tail072b2f.ts.net:8443/realms/HNHTravel-SGN
       - ERPNext__DefaultHost=erpnext:8080
       - Encryption__MasterKey=${MASTER_KEY}
@@ -506,6 +516,9 @@ services:
       - ConnectionStrings__Default=Host=postgres;Port=5432;Database=erphub_api_db;Username=erphub;Password=${ERPHUB_DB_PASSWORD}
       - Redis__ConnectionString=redis:6379,password=${REDIS_PASSWORD}
       - RabbitMQ__Host=rabbitmq
+      - RabbitMQ__Username=${RABBIT_USER}
+      - RabbitMQ__Password=${RABBIT_PASS}
+      - RABBITMQ_EXCHANGE_NAME=1stopshop_event_bus
       - Keycloak__RealmUrl=https://quanna.tail072b2f.ts.net:8443/realms/HNHTravel-SGN
       - ERPNext__DefaultHost=erpnext:8080
       - Encryption__MasterKey=${MASTER_KEY}
@@ -526,6 +539,18 @@ networks:
 
 ```yaml
 # Kong DB-less declarative config cho public-facing ERP API Hub
+_format_version: "3.0"
+
+consumers:
+  - username: keycloak-hnhtravel-sgn
+    jwt_secrets:
+      - key: ${KEYCLOAK_JWKS_KID}
+        algorithm: RS256
+        rsa_public_key: |
+          -----BEGIN PUBLIC KEY-----
+          ${KEYCLOAK_RSA_PUBLIC_KEY_PEM}
+          -----END PUBLIC KEY-----
+
 services:
   - name: erp-api-hub
     url: http://erp-api-hub:8008
@@ -541,7 +566,7 @@ services:
         config:
           uri_param_names: []
           cookie_names: []
-          key_claim_name: iss
+          key_claim_name: kid
           secret_is_base64: false
           claims_to_verify:
             - exp
@@ -565,6 +590,10 @@ services:
         strip_path: true
     plugins: []  # No JWT for internal webhook callbacks
 ```
+
+`KEYCLOAK_JWKS_KID` and `KEYCLOAK_RSA_PUBLIC_KEY_PEM` are derived from the Keycloak realm JWKS endpoint:
+`https://quanna.tail072b2f.ts.net:8443/realms/HNHTravel-SGN/protocol/openid-connect/certs`.
+In DB-less mode, Kong validates RS256 using the pinned public key in `kong.yml`; update this config during Keycloak key rotation.
 
 ### 5.3 YARP Configuration (yarp.json) — Internal API Gateway
 
