@@ -62,7 +62,7 @@ The ERP API Hub provides:
 - **HNH-TDD-SA-002 v1.0** — HNH Travel Workspace System Architecture Document
 - ERPNext REST API Documentation: https://frappeframework.com/docs/user/en/api/rest
 - Keycloak Documentation: https://www.keycloak.org/documentation
-- Kong Gateway Documentation: https://docs.konghq.com/
+- YARP API Gateway Documentation: https://docs.konghq.com/
 
 ---
 
@@ -83,7 +83,7 @@ The ERP API Hub provides:
 │          └──────────────────────┼────────────────────────────┘                │
 │                                 │                                             │
 │                          ┌──────▼──────┐                                      │
-│                          │ Kong Gateway │  ← Shared with Workspace             │
+│                          │ YARP API Gateway │  ← Shared with Workspace             │
 │                          │   3.x       │     JWT Validation                     │
 │                          │ DB-less     │     Rate Limiting                      │
 │                          └──────┬──────┘                                      │
@@ -115,11 +115,11 @@ The ERP API Hub provides:
 
 | Component | Technology | Responsibility | Shared? |
 |-----------|-----------|---------------|---------|
-| Kong Gateway | Kong 3.x (DB-less) | Edge proxy, JWT validation, routing, rate limiting | ✅ Shared với Workspace |
+| YARP API Gateway | YARP (.NET 9) (DB-less) | Edge proxy, JWT validation, routing, rate limiting | ✅ Shared với Workspace |
 | ERP API Hub | .NET Core 8 | Business logic, transformation, orchestration | ❌ Dedicated |
-| PostgreSQL | PostgreSQL 16 | Audit logs, system registry, config | ✅ Shared (DB riêng: `erp_api_hub`) |
+| PostgreSQL | PostgreSQL 18 | Audit logs, system registry, config | ✅ Shared (DB riêng: `erphub_api_db`) |
 | Redis | Redis 7.x | Response cache, rate limit counters, sessions | ✅ Shared (prefix: `erphub:`) |
-| RabbitMQ | RabbitMQ 3.12 | Async ingestion, event bus, retry/DLQ | ✅ Shared (exchange riêng: `hnh.erp.events`) |
+| RabbitMQ | RabbitMQ 3.12 | Async ingestion, event bus, retry/DLQ | ✅ Shared (exchange riêng: `1stopshop_event_bus`) |
 | ERPNext | ERPNext v15 | Core ERP, REST API, business data | ❌ Dedicated (internal) |
 
 ### 2.3 Integration với HNH Travel Workspace
@@ -128,27 +128,27 @@ The ERP API Hub provides:
 |-------|---------|
 | **Workspace → ERP** | Không trực tiếp. Workspace services gọi ERP qua API Hub nếu cần (tương lai). |
 | **ERP → Workspace** | Không trực tiếp. ERP events qua webhook có thể trigger workspace actions (tương lai). |
-| **Shared Infra** | Kong, PostgreSQL, Redis, RabbitMQ, Keycloak — dùng chung, isolate qua routing/database/prefix. |
+| **Shared Infra** | YARP API Gateway, PostgreSQL, Redis, RabbitMQ, Keycloak — dùng chung, isolate qua routing/database/prefix. |
 | **Module FIN** | Độc lập. API Hub không tương tác với FIN. |
 
 ### 2.4 Data Flow Summary
 
 **Ingestion Flow (External → ERP):**
 ```
-External System → Kong (/api/erp/ingest/*) → API Hub → Validate → Transform 
-→ Queue (RabbitMQ: hnh.erp.events) → Worker → ERPNext REST API → MariaDB
+External System → YARP (/api/erp/ingest/*) → API Hub → Validate → Transform 
+→ Queue (RabbitMQ: 1stopshop_event_bus) → Worker → ERPNext REST API → MariaDB
 ```
 
 **Query Flow (External ← ERP):**
 ```
-External System → Kong (/api/erp/query/*) → API Hub → Cache Check 
+External System → YARP (/api/erp/query/*) → API Hub → Cache Check 
 → ERPNext API → Cache Store → Response
 ```
 
 **Webhook Flow (ERP → External):**
 ```
 ERPNext Document Event → Frappe Server Script → API Hub Internal (/internal/erp/events) 
-→ RabbitMQ (hnh.erp.events) → Webhook Dispatcher → External System
+→ RabbitMQ (1stopshop_event_bus) → Webhook Dispatcher → External System
 ```
 
 ---
@@ -260,7 +260,7 @@ Handles all data flowing from external systems into ERPNext. Supports both synch
 #### FR-ING-001: External System Registration
 - **Description:** Before ingestion, external systems must be registered.
 - **Fields:**
-  - `system_id` (UUID, primary key)
+  - `system_id` (ULID, primary key)
   - `system_name` (e.g., "salesforce-crm", "website-ecommerce")
   - `system_type` (enum: CRM, ECOMMERCE, HR, PAYROLL, SUPPLIER, BI, OTHER)
   - `webhook_url` (optional, for async callbacks)
@@ -345,12 +345,12 @@ Handles all data flowing from external systems into ERPNext. Supports both synch
 - **Message Format:**
   ```json
   {
-    "message_id": "uuid",
+    "message_id": "ulid",
     "system_id": "salesforce-crm",
     "operation": "CREATE",
     "doctype": "Customer",
     "payload": {...},
-    "idempotency_key": "uuid",
+    "idempotency_key": "ulid",
     "tenant_id": "frontend",
     "timestamp": "2026-05-26T12:00:00Z",
     "retry_count": 0
@@ -383,7 +383,7 @@ Handles all data flowing from external systems into ERPNext. Supports both synch
 - **Batch Format:**
   ```json
   {
-    "batch_id": "uuid",
+    "batch_id": "ulid",
     "operations": [
       {"operation": "CREATE", "doctype": "Customer", "payload": {...}},
       {"operation": "CREATE", "doctype": "Customer", "payload": {...}}
@@ -396,7 +396,7 @@ Handles all data flowing from external systems into ERPNext. Supports both synch
 #### FR-ING-009: Idempotency Keys
 - **Description:** Prevent duplicate processing.
 - **Mechanism:**
-  - Client provides `Idempotency-Key: {uuid}` header
+  - Client provides `Idempotency-Key: {ulid}` header
   - API Hub stores key in Redis (TTL: 24 hours)
   - Duplicate key detected → return cached response (201 for create, 200 for update)
   - No key provided → operation proceeds without idempotency guarantee
@@ -528,7 +528,7 @@ Enables ERPNext to push event notifications to external systems via HTTP callbac
 #### FR-WHK-001: Subscription Management
 - **Description:** External systems register/unregister webhook subscriptions.
 - **Subscription Fields:**
-  - `subscription_id` (UUID)
+  - `subscription_id` (ULID)
   - `system_id` (reference to registered system)
   - `event_types` (array: ["booking_created", "invoice_paid"])
   - `webhook_url` (HTTPS URL)
@@ -626,9 +626,9 @@ Comprehensive logging of all API Hub activities for security, compliance, and tr
 #### FR-AUD-001: API Call Logging
 - **Description:** Log every API call with full context.
 - **Log Fields:**
-  - `log_id` (UUID)
+  - `log_id` (ULID)
   - `timestamp` (ISO 8601 with timezone)
-  - `request_id` (correlation ID from Kong)
+  - `request_id` (correlation ID from YARP)
   - `tenant_id` (site identifier)
   - `system_id` (external system identifier)
   - `user_id` (Keycloak user ID)
@@ -735,19 +735,19 @@ Prevent abuse and ensure fair usage across all external systems.
   - `X-RateLimit-Reset`: Unix timestamp when limit resets
   - `Retry-After`: Seconds until next request allowed
 
-#### FR-RLM-005: Kong Integration
-- **Description:** Leverage Kong's rate-limiting plugin where applicable.
+#### FR-RLM-005: YARP Integration
+- **Description:** Leverage YARP's rate-limiting plugin where applicable.
 - **Configuration:**
-  - Kong handles edge rate limiting (first line of defense)
+  - YARP handles edge rate limiting (first line of defense)
   - API Hub handles application-level rate limiting (granular control)
-  - **DB-less Mode (Current):** Kong config phải qua declarative file (kong.yml). Tier configuration changes require CI/CD pipeline update → redeploy Kong
-  - **DB-backed Mode (Future Option):** Nếu cần dynamic config, migrate sang Kong DB-backed mode để sử dụng Admin API runtime
+  - **DB-less Mode (Current):** YARP config phải qua declarative file (yarp.json). Tier configuration changes require CI/CD pipeline update → redeploy YARP
+  - **DB-backed Mode (Future Option):** Nếu cần dynamic config, migrate sang YARP DB-backed mode để sử dụng Admin API runtime
 - **Sync Process (DB-less):**
   1. Admin cập nhật tier config trong API Hub UI
-  2. API Hub generates updated `kong.yml` snippet
-  3. Git commit + PR → merge → CI/CD redeploys Kong
-  4. Kong reloads declarative config (zero downtime with kong reload)
-- **Fallback:** If Kong rate limit fails, API Hub applies its own rate limiting
+  2. API Hub generates updated `yarp.json` snippet
+  3. Git commit + PR → merge → CI/CD redeploys YARP
+  4. YARP reloads declarative config (zero downtime with kong reload)
+- **Fallback:** If YARP rate limit fails, API Hub applies its own rate limiting
 
 ---
 
@@ -761,7 +761,7 @@ Manage external system registrations, mapping rules, and API Hub settings.
 #### FR-CFG-001: External System Registry
 - **Description:** CRUD operations for external systems.
 - **Fields:**
-  - `system_id` (UUID, PK)
+  - `system_id` (ULID, PK)
   - `system_name` (unique, slug)
   - `system_type` (enum)
   - `description`
@@ -780,7 +780,7 @@ Manage external system registrations, mapping rules, and API Hub settings.
 - **Rule Structure:**
   ```json
   {
-    "rule_id": "uuid",
+    "rule_id": "ulid",
     "system_id": "salesforce-crm",
     "external_endpoint": "/customers",
     "erpnext_doctype": "Customer",
@@ -851,8 +851,8 @@ The complete API specification is available at:
 |--------|----------|-------------|
 | Authorization | Yes | `Bearer {keycloak_jwt_token}` |
 | X-Tenant-ID | Yes | Tenant/site identifier (default: `frontend`) |
-| X-Idempotency-Key | No | UUID for idempotent operations |
-| X-Idempotency-Key | No | UUID for idempotent operations |
+| X-Idempotency-Key | No | ULID for idempotent operations |
+| X-Idempotency-Key | No | ULID for idempotent operations |
 | Accept | No | `application/json` (default) |
 | Content-Type | Yes (POST/PUT) | `application/json` |
 
@@ -863,7 +863,7 @@ The complete API specification is available at:
 {
   "data": { ... },
   "meta": {
-    "request_id": "uuid",
+    "request_id": "ulid",
     "timestamp": "2026-05-26T12:00:00Z",
     "duration_ms": 45
   }
@@ -964,7 +964,7 @@ External System                    API Hub                          ERPNext
      │                              │ 6. Queue to RabbitMQ            │
      │                              │                                 │
      │ 202 Accepted                 │                                 │
-     │ {job_id: "uuid"}             │                                 │
+     │ {job_id: "ulid"}             │                                 │
      │<─────────────────────────────│                                 │
      │                              │                                 │
      │                              │ Consumer dequeues message       │
@@ -977,7 +977,7 @@ External System                    API Hub                          ERPNext
      │                              │ 7. Log audit                    │
      │                              │ 8. Update job status            │
      │                              │                                 │
-     │ GET /api/v1/ingest/status/uuid                               │
+     │ GET /api/v1/ingest/status/ulid                               │
      │<─────────────────────────────│                                 │
      │ {status: "completed"}        │                                 │
 ```
@@ -1099,7 +1099,7 @@ All errors follow RFC 7807 format:
       "code": "format"
     }
   ],
-  "request_id": "req-uuid",
+  "request_id": "req-ulid",
   "timestamp": "2026-05-26T12:00:00Z"
 }
 ```
@@ -1205,9 +1205,9 @@ Các yêu cầu tuân thủ pháp luật Việt Nam cho doanh nghiệp du lịch
 
 | Layer | Cơ chế | Chi tiết |
 |-------|--------|----------|
-| Network | Nginx + Firewall | Chỉ expose Kong port 443 ra ngoài. Internal services (ERPNext, PostgreSQL, RabbitMQ) không có public IP |
+| Network | Nginx + Firewall | Chỉ expose YARP API Gateway port 8888 ra ngoài. Internal services (ERPNext, PostgreSQL, RabbitMQ) không có public IP |
 | Transport | TLS 1.3 | HTTPS bắt buộc. HTTP redirect sang HTTPS. HSTS header. Strong cipher suites only |
-| Edge | Kong JWT Plugin | Validate Bearer token trên mọi request. Inject headers: X-User-Id, X-Branch-Id, X-Role. Không cần services gọi lại Keycloak |
+| Edge | YARP JWT Plugin | Validate Bearer token trên mọi request. Inject headers: X-User-Id, X-Branch-Id, X-Role. Không cần services gọi lại Keycloak |
 | App | API Hub Auth Proxy | Map Keycloak token → ERPNext API Key. Validate tenant context per request |
 | Data at rest | AES-256-GCM | ERPNext API secrets encrypted trong PostgreSQL. PII fields encrypted |
 | Data masking | Application layer | Back-stage/external systems không thấy SĐT/email/passport đầy đủ |
@@ -1318,7 +1318,7 @@ Các yêu cầu tuân thủ pháp luật Việt Nam cho doanh nghiệp du lịch
 
 #### Tracing (OpenTelemetry/Jaeger)
 - Distributed tracing across API Hub → ERPNext → Database
-- Trace ID propagation via Kong correlation ID
+- Trace ID propagation via YARP correlation ID
 - Span tags: tenant_id, system_id, operation, doctype
 
 #### Logging (ELK Stack)
@@ -1335,7 +1335,7 @@ Các yêu cầu tuân thủ pháp luật Việt Nam cho doanh nghiệp du lịch
 
 ```sql
 CREATE TABLE external_systems (
-    system_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    system_id ULID PRIMARY KEY DEFAULT gen_random_ulid(),
     system_name VARCHAR(100) NOT NULL,
     system_type VARCHAR(50) NOT NULL,
     description TEXT,
@@ -1354,10 +1354,10 @@ CREATE TABLE external_systems (
 
 ```sql
 CREATE TABLE audit_logs (
-    log_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    log_id ULID PRIMARY KEY DEFAULT gen_random_ulid(),
     request_id VARCHAR(100),
     tenant_id VARCHAR(100) NOT NULL,
-    system_id UUID REFERENCES external_systems(system_id),
+    system_id ULID REFERENCES external_systems(system_id),
     user_id VARCHAR(255),
     method VARCHAR(10) NOT NULL,
     endpoint VARCHAR(500) NOT NULL,
@@ -1375,8 +1375,8 @@ CREATE TABLE audit_logs (
 
 ```sql
 CREATE TABLE webhook_subscriptions (
-    subscription_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    system_id UUID NOT NULL REFERENCES external_systems(system_id),
+    subscription_id ULID PRIMARY KEY DEFAULT gen_random_ulid(),
+    system_id ULID NOT NULL REFERENCES external_systems(system_id),
     event_types TEXT[] NOT NULL,
     webhook_url VARCHAR(500) NOT NULL,
     secret_encrypted BYTEA,
@@ -1424,7 +1424,7 @@ Dựa trên HNH Travel System Architecture Document (HNH-TDD-SA-002), ERP API Hu
 │          └──────────────────────┼────────────────────────────┘                │
 │                                 │                                             │
 │                          ┌──────▼──────┐                                      │
-│                          │ Kong Gateway │  ← Shared with Workspace             │
+│                          │ YARP API Gateway │  ← Shared with Workspace             │
 │                          │   3.x       │     JWT Validation                     │
 │                          │ DB-less     │     Rate Limiting                      │
 │                          └──────┬──────┘                                      │
@@ -1455,11 +1455,11 @@ Dựa trên HNH Travel System Architecture Document (HNH-TDD-SA-002), ERP API Hu
 ### 16.2 Nguyên tắc thiết kế
 
 #### SA-001: Tận dụng Infrastructure hiện có
-- **Kong Gateway:** Dùng ch Kong 3.x đang chạy (DB-less mode). Thêm route `/api/erp/*` → ERP API Hub.
-- **Keycloak:** Dùng shared realm `hnh-travel`. Thêm roles `api-hub:read`, `api-hub:write`, `api-hub:admin`, `api-hub:webhook`.
-- **PostgreSQL 16:** Dùng shared instance (separate database `erp_api_hub`).
+- **YARP API Gateway:** Dùng ch YARP (.NET 9) đang chạy ((.NET 9)). Thêm route `/api/erp/*` → ERP API Hub.
+- **Keycloak:** Dùng shared realm `HNHTravel-SGN`. Thêm roles `api-hub:read`, `api-hub:write`, `api-hub:admin`, `api-hub:webhook`.
+- **PostgreSQL 18:** Dùng shared instance (separate database `erphub_api_db`).
 - **Redis 7:** Dùng shared instance (separate key prefix `erphub:`).
-- **RabbitMQ:** **Tách riêng exchange** `hnh.erp.events` để cách ly workload ingestion khỏi hệ thống workspace.
+- **RabbitMQ:** **Tách riêng exchange** `1stopshop_event_bus` để cách ly workload ingestion khỏi hệ thống workspace.
 
 #### SA-002: Cách ly module — Zero coupling với Workspace
 - API Hub **KHÔNG** gọi trực tiếp bất kỳ workspace service nào (Core, CRM, Ticketing, v.v.).
@@ -1472,7 +1472,7 @@ Dựa trên HNH Travel System Architecture Document (HNH-TDD-SA-002), ERP API Hu
 
 #### SA-004: Auth Proxy Pattern (Option C)
 ```
-External System ──► Kong (JWT validate) ──► API Hub (map to ERPNext API Key)
+External System ──► YARP (JWT validate) ──► API Hub (map to ERPNext API Key)
                                                   │
                                                   ▼
                                             ERPNext REST API
@@ -1488,16 +1488,16 @@ External System ──► Kong (JWT validate) ──► API Hub (map to ERPNext 
 | Thành phần | Lựa chọn | Lý do |
 |-----------|---------|-------|
 | API Hub Service | .NET Core 8 | Team có expertise; consistency với workspace services; rich middleware ecosystem (rate limiting, auth, caching) |
-| Database | PostgreSQL 16 (shared) | Infrastructure hiện có; audit logs, config, registry |
+| Database | PostgreSQL 18 (shared) | Infrastructure hiện có; audit logs, config, registry |
 | Cache | Redis 7 (shared, prefix `erphub:`) | Response caching, rate limit counters, session store |
-| Message Queue | RabbitMQ 3.12 (exchange `hnh.erp.events`) | Async ingestion; cách ly khỏi workspace events |
-| API Gateway | Kong 3.x (DB-less) | Existing; JWT validation; rate limiting |
-| Identity | Keycloak (shared realm `hnh-travel`) | Single sign-on; existing realm configuration |
+| Message Queue | RabbitMQ 3.12 (exchange `1stopshop_event_bus`) | Async ingestion; cách ly khỏi workspace events |
+| API Gateway | YARP (.NET 9) (DB-less) | Existing; JWT validation; rate limiting |
+| Identity | Keycloak (shared realm `HNHTravel-SGN`) | Single sign-on; existing realm configuration |
 | ERP Backend | ERPNext v15 (Frappe Framework) | Existing system; REST API tại `/api/resource/{Doctype}` |
 
-### 16.4 Kong Routing Configuration
+### 16.4 YARP Routing Configuration
 
-Thêm vào `kong.yml` declarative config:
+Thêm vào `yarp.json` declarative config:
 
 ```yaml
 services:
@@ -1542,11 +1542,11 @@ services:
 
 ### 16.5 Keycloak Realm Configuration — Bổ sung
 
-Thêm vào realm `hnh-travel`:
+Thêm vào realm `HNHTravel-SGN`:
 
 ```json
 {
-  "realm": "hnh-travel",
+  "realm": "HNHTravel-SGN",
   "roles": {
     "realm": [
       { "name": "api-hub:read", "description": "Query ERP data" },
@@ -1571,20 +1571,20 @@ Thêm vào realm `hnh-travel`:
 ### 16.6 RabbitMQ Exchange Design
 
 ```
-Exchange: hnh.erp.events (topic, durable)
+Exchange: 1stopshop_event_bus (topic, durable)
 ├── Routing Keys:
-│   ├── erp.ingestion.{doctype}.created
-│   ├── erp.ingestion.{doctype}.updated
-│   ├── erp.ingestion.{doctype}.failed
-│   ├── erp.webhook.{event_type}
-│   └── erp.audit.{action}
+│   ├── erphub.ingestion.{doctype}.created
+│   ├── erphub.ingestion.{doctype}.updated
+│   ├── erphub.ingestion.{doctype}.failed
+│   ├── erphub.webhook.{event_type}
+│   └── erphub.audit.{action}
 │
 ├── Queues:
-│   ├── erp.ingestion.default (durable)
-│   ├── erp.ingestion.high (durable, priority: 10)
-│   ├── erp.ingestion.low (durable)
-│   ├── erp.webhook.delivery (durable)
-│   └── erp.ingestion.dlq (dead letter, TTL: 30 days)
+│   ├── erphub.ingestion.default (durable)
+│   ├── erphub.ingestion.high (durable, priority: 10)
+│   ├── erphub.ingestion.low (durable)
+│   ├── erphub.webhook.delivery (durable)
+│   └── erphub.ingestion.dlq (dead letter, TTL: 30 days)
 │
 └── DLQ Policy:
     ├── Max retries: 5
@@ -1599,7 +1599,7 @@ Exchange: hnh.erp.events (topic, durable)
 │                     DOCKER HOST (On-premise)                  │
 │                                                               │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐   │
-│  │   Nginx     │  │   Kong      │  │   ERP API Hub       │   │
+│  │   Nginx     │  │   YARP      │  │   ERP API Hub       │   │
 │  │   (443)     │──│   (8000)    │──│   (.NET Core 8)     │   │
 │  │             │  │  DB-less    │  │   Port: 8008        │   │
 │  └─────────────┘  └─────────────┘  └─────────────────────┘   │
@@ -1607,7 +1607,7 @@ Exchange: hnh.erp.events (topic, durable)
 │         │                │                  │                 │
 │  ┌──────▼──────┐  ┌────▼─────┐  ┌───────▼────────┐         │
 │  │  ERPNext    │  │ RabbitMQ │  │  PostgreSQL    │         │
-│  │  (nginx)    │  │(5672/    │  │  (Port: 5432)  │         │
+│  │  (nginx)    │  │(5672/    │  │  (Port: 5452)  │         │
 │  │  Port: 8080 │  │ 15672)   │  │  DB: erp_api_  │         │
 │  │             │  │          │  │     hub         │         │
 │  └─────────────┘  └─────────┘  └────────────────┘         │
@@ -1645,9 +1645,9 @@ Exchange: hnh.erp.events (topic, durable)
 
 | Layer | Cơ chế | Chi tiết |
 |-------|--------|----------|
-| Network | Nginx + Firewall | Chỉ expose Kong port 443 ra ngoài. ERPNext internal (no public IP) |
+| Network | Nginx + Firewall | Chỉ expose YARP API Gateway port 8888 ra ngoài. ERPNext internal (no public IP) |
 | Transport | TLS 1.3 | HTTPS bắt buộc. HSTS header |
-| Edge | Kong JWT Plugin | Validate Bearer token. Inject X-User-Id, X-Branch-Id headers |
+| Edge | YARP JWT Plugin | Validate Bearer token. Inject X-User-Id, X-Branch-Id headers |
 | App | API Hub Auth | Map Keycloak token → ERPNext API Key. Validate tenant context |
 | Data at rest | AES-256-GCM | ERPNext API secrets encrypted in PostgreSQL |
 | Audit | Structured logs | JSON format, correlation ID, PII masking |
@@ -1662,8 +1662,8 @@ Exchange: hnh.erp.events (topic, durable)
 | ADR-002 | Auth pattern | Auth Proxy (Option C) | Không sửa ERPNext core; tận dụng Keycloak hiện có |
 | ADR-003 | Tenant isolation | ERPNext Sites + Tenant Registry | Native ERPNext multi-tenancy; dynamic resolution |
 | ADR-004 | Event sourcing | Hybrid: Server Script + Polling | ERPNext không có native webhooks; minimal intrusion |
-| ADR-005 | Message Queue | Separate exchange `hnh.erp.events` | Cách ly workload; không ảnh hưởng workspace events |
-| ADR-006 | Database | Shared PostgreSQL 16 (separate DB) | Tận dụng infrastructure; không cần thêm DB server |
+| ADR-005 | Message Queue | Separate exchange `1stopshop_event_bus` | Cách ly workload; không ảnh hưởng workspace events |
+| ADR-006 | Database | Shared PostgreSQL 18 (separate DB) | Tận dụng infrastructure; không cần thêm DB server |
 | ADR-007 | Cache | Shared Redis 7 (key prefix `erphub:`) | Tận dụng infrastructure; isolation qua prefix |
 
 ---
