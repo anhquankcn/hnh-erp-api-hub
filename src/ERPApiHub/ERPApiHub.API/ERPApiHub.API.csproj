@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.5" />
+    <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
+    <ProjectReference Include="..\ERPApiHub.Infrastructure\ERPApiHub.Infrastructure.csproj" />
+  </ItemGroup>
+</Project>

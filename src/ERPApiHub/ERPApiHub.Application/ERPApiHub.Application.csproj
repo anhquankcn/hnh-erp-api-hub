@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\ERPApiHub.Domain\ERPApiHub.Domain.csproj" />
+  </ItemGroup>
+</Project>
