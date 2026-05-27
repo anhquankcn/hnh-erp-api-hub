@@ -3,6 +3,7 @@ using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
 using ERPApiHub.Infrastructure.ErpNext;
 using ERPApiHub.Infrastructure.Messaging;
+using ERPApiHub.Infrastructure.Security;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,6 +25,13 @@ public static class DependencyInjection
         services.Configure<RabbitMqOptions>(configuration.GetSection(RabbitMqOptions.SectionName));
         services.Configure<RedisOptions>(configuration.GetSection(RedisOptions.SectionName));
         services.Configure<ErpNextOptions>(configuration.GetSection(ErpNextOptions.SectionName));
+        services.Configure<ERPApiHub.Application.Auth.KeycloakTokenOptions>(options =>
+        {
+            var keycloakSection = configuration.GetSection(KeycloakOptions.SectionName);
+            options.Authority = keycloakSection.GetValue<string>("Authority") ?? "";
+            options.ClientId = keycloakSection.GetValue<string>("ClientId") ?? "erp-api-hub";
+            options.ClientSecret = keycloakSection.GetValue<string>("ClientSecret") ?? "";
+        });
 
         var redisConnectionString = BuildRedisConnectionString(configuration);
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnectionString));

@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("ERPApiHub.Worker")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+3fe779ba5f274c4824568ce484b62972628e550e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+60520b73d3dc62a69f9c14d4d2886d2ee8aa9d6c")]
 [assembly: System.Reflection.AssemblyProductAttribute("ERPApiHub.Worker")]
 [assembly: System.Reflection.AssemblyTitleAttribute("ERPApiHub.Worker")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

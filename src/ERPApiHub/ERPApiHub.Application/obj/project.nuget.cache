@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "xhkCFZ2IWCE=",
+  "dgSpecHash": "xraEoS54q4w=",
   "success": true,
-  "projectFilePath": "/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
+  "projectFilePath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
   "expectedPackageFiles": [
     "/Users/quanna/.nuget/packages/microsoft.extensions.configuration/9.0.0/microsoft.extensions.configuration.9.0.0.nupkg.sha512",
     "/Users/quanna/.nuget/packages/microsoft.extensions.configuration.abstractions/9.0.0/microsoft.extensions.configuration.abstractions.9.0.0.nupkg.sha512",
@@ -39,9 +39,9 @@
       "code": "NU1902",
       "level": "Warning",
       "message": "Package 'OpenTelemetry.Exporter.OpenTelemetryProtocol' 1.11.2 has a known moderate severity vulnerability, https://github.com/advisories/GHSA-4625-4j76-fww9",
-      "projectPath": "/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
+      "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
       "warningLevel": 1,
-      "filePath": "/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
+      "filePath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
       "libraryId": "OpenTelemetry.Exporter.OpenTelemetryProtocol",
       "targetGraphs": [
         "net9.0"

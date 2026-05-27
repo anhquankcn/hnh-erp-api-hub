@@ -25,6 +25,11 @@ public sealed class WebhookSubscriptionService
 
     public async Task<WebhookSubscription> CreateAsync(string systemId, string[] eventTypes, string webhookUrl, string? secret, string tenantId, CancellationToken ct)
     {
+        var existing = await _repository.GetWebhookSubscriptionsBySystemAsync(systemId, ct);
+        if (existing.Count >= 10)
+        {
+            throw new InvalidOperationException($"System {systemId} already has maximum of 10 webhook subscriptions");
+        }
         var subscription = new WebhookSubscription
         {
             SubscriptionId = UlidGenerator.Generate(),

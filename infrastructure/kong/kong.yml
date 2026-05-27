@@ -15,6 +15,19 @@ services:
         strip_path: false
         regex_priority: 0
 
+  - name: erpnext
+    url: http://erpnext:8080/
+    path: /
+    retries: 3
+    connect_timeout: 5000
+    read_timeout: 30000
+    routes:
+      - name: erpnext-api
+        paths:
+          - /api/method
+        strip_path: false
+        regex_priority: 0
+
   - name: erp-gateway
     url: http://erp-gateway:8888/
     path: /
@@ -27,12 +40,27 @@ services:
         regex_priority: 1
 
 plugins:
-  # Authentication is validated downstream by YARP Gateway and the API via
-  # OIDC discovery. Kong should not enforce JWT credentials globally.
+  - name: jwt
+    config:
+      uri_param_names: []
+      cookie_names: []
+      key_claim_name: iss
+      secret_is_base64: false
+      claims_to_verify:
+        - exp
+
   - name: rate-limiting
     config:
-      minute: 1000
-      policy: local
+      minute: 100
+      policy: redis
+      redis_host: redis
+      redis_port: 6379
+
+  - name: acl
+    config:
+      whitelist:
+        - api-hub-users
+      hide_groups_header: false
 
   - name: request-transformer
     config:
@@ -60,3 +88,12 @@ plugins:
         - Authorization
         - X-Branch-Id
         - Content-Type
+
+consumers:
+  - username: erphub-client
+    acl_groups:
+      - api-hub-users
+    jwt_credentials:
+      - algorithm: RS256
+        rsa_public_key: "${JWT_RSA_PUBLIC_KEY}"
+        key: erphub-client-key

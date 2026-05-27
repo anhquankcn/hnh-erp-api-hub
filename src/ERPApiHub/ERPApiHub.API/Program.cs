@@ -46,6 +46,13 @@ builder.Services.AddScoped<WebhookSubscriptionService>();
 builder.Services.AddScoped<WebhookDeliveryService>();
 builder.Services.AddHttpClient("WebhookDelivery");
 
+// S4-002: Token Lifecycle
+builder.Services.AddScoped<ERPApiHub.Application.Auth.TokenService>();
+builder.Services.AddHttpClient("KeycloakToken");
+
+// S4-005: DLQ Management
+builder.Services.AddScoped<DlqManagementService>();
+
 // S3-001: Rate Limiting
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(RateLimitOptions.SectionName));
 builder.Services.AddScoped<RateLimitService>();
@@ -100,6 +107,31 @@ app.UseAuthentication();
 app.UseMiddleware<RateLimitMiddleware>();
 
 app.UseAuthorization();
+
+// ─── Auth Endpoints (S4-002) ───
+
+app.MapPost("/api/v1/auth/refresh", async (RefreshTokenRequest req, ERPApiHub.Application.Auth.TokenService service, CancellationToken ct) =>
+{
+    var result = await service.RefreshTokenAsync(req.RefreshToken, ct);
+    return result is null ? Results.Unauthorized() : Results.Ok(result);
+}).AllowAnonymous();
+
+app.MapPost("/api/v1/auth/revoke", async (RevokeTokenRequest req, ERPApiHub.Application.Auth.TokenService service, CancellationToken ct) =>
+{
+    var verify = service.VerifyToken(req.Token);
+    if (verify.IsValid && verify.Jti is not null)
+    {
+        var remaining = verify.Expiry.HasValue ? verify.Expiry.Value - DateTime.UtcNow : TimeSpan.FromHours(1);
+        await service.RevokeTokenAsync(verify.Jti, remaining, ct);
+    }
+    return Results.Ok(new { message = "Token revoked" });
+}).AllowAnonymous();
+
+app.MapGet("/api/v1/auth/verify", (string token, ERPApiHub.Application.Auth.TokenService service) =>
+{
+    var verify = service.VerifyToken(token);
+    return verify.IsValid ? Results.Ok(verify) : Results.Unauthorized();
+}).AllowAnonymous();
 
 // Root & health
 app.MapGet("/", () => Results.Ok(new { service = "erp-api-hub", status = "running" }))
@@ -406,6 +438,16 @@ public sealed record RotateApiKeyRequest
 public sealed record TaxIdValidationRequest
 {
     public string TaxId { get; init; } = string.Empty;
+}
+
+public sealed record RefreshTokenRequest
+{
+    public string RefreshToken { get; init; } = string.Empty;
+}
+
+public sealed record RevokeTokenRequest
+{
+    public string Token { get; init; } = string.Empty;
 }
 
 public sealed record InvoiceTemplateValidationRequest
