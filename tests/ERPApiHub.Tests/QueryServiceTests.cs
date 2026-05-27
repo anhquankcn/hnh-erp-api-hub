@@ -1,7 +1,6 @@
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Query;
-using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
@@ -14,10 +13,11 @@ namespace ERPApiHub.Tests;
 public sealed class QueryServiceTests
 {
     private readonly Mock<IErpNextClient> _erpNextClient = new();
-    private readonly Mock<IRedisCacheService> _cache = new();
-    private readonly Mock<IHttpContextAccessor> _httpContextAccessor = new();
+    private readonly Mock<ICacheService> _cache = new();
+    private Mock<IHttpContextAccessor> _httpContextAccessor = new();
     private readonly Mock<ILogger<QueryService>> _logger = new();
     private readonly ErpHubDbContext _dbContext;
+    private readonly IErpHubRepository _repository;
 
     public QueryServiceTests()
     {
@@ -25,6 +25,7 @@ public sealed class QueryServiceTests
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options;
         _dbContext = new ErpHubDbContext(options);
+        _repository = new ErpHubRepository(_dbContext);
 
         SetupHttpContext("SGN");
     }
@@ -53,7 +54,7 @@ public sealed class QueryServiceTests
     private QueryService CreateService() => new(
         _erpNextClient.Object,
         _cache.Object,
-        _dbContext,
+        _repository,
         _httpContextAccessor.Object,
         _logger.Object);
 

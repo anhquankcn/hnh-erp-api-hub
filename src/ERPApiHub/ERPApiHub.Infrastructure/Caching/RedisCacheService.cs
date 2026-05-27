@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using ERPApiHub.Application.Abstractions;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
@@ -20,7 +21,7 @@ public interface IRedisCacheService
         CancellationToken cancellationToken = default);
 }
 
-public sealed class RedisCacheService : IRedisCacheService
+public sealed class RedisCacheService : IRedisCacheService, ICacheService
 {
     private const string RequiredKeyPrefix = "erphub:";
 
@@ -61,6 +62,27 @@ public sealed class RedisCacheService : IRedisCacheService
         cancellationToken.ThrowIfCancellationRequested();
 
         await _database.KeyDeleteAsync(BuildKey(key));
+    }
+
+    public async Task<bool> ExistsAsync(string key, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return await _database.KeyExistsAsync(BuildKey(key));
+    }
+
+    public async Task<long> IncrementAsync(string key, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return await _database.StringIncrementAsync(BuildKey(key));
+    }
+
+    public async Task ExpireAsync(string key, TimeSpan expiration, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        await _database.KeyExpireAsync(BuildKey(key), expiration);
     }
 
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _keyLocks = new();

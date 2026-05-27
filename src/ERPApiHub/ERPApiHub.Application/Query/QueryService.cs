@@ -3,35 +3,31 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
-using ERPApiHub.Infrastructure.Caching;
-using ERPApiHub.Infrastructure.Data;
 using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using NetUlid;
 
 namespace ERPApiHub.Application.Query;
 
 public sealed class QueryService
 {
     private readonly IErpNextClient _erpNextClient;
-    private readonly IRedisCacheService _cacheService;
-    private readonly ErpHubDbContext _dbContext;
+    private readonly ICacheService _cacheService;
+    private readonly IErpHubRepository _repository;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger<QueryService> _logger;
 
     public QueryService(
         IErpNextClient erpNextClient,
-        IRedisCacheService cacheService,
-        ErpHubDbContext dbContext,
+        ICacheService cacheService,
+        IErpHubRepository repository,
         IHttpContextAccessor httpContextAccessor,
         ILogger<QueryService> logger)
     {
         _erpNextClient = erpNextClient;
         _cacheService = cacheService;
-        _dbContext = dbContext;
+        _repository = repository;
         _httpContextAccessor = httpContextAccessor;
         _logger = logger;
     }
@@ -48,7 +44,7 @@ public sealed class QueryService
 
         if (!bypassCache)
         {
-            var cached = await _cacheService.GetAsync<PaginatedResponse<JsonElement>>(cacheKey, cancellationToken);
+            PaginatedResponse<JsonElement>? cached = await _cacheService.GetAsync<PaginatedResponse<JsonElement>>(cacheKey, cancellationToken);
             if (cached is not null)
             {
                 _logger.LogDebug("Cache hit for {CacheKey}", cacheKey);
@@ -62,13 +58,13 @@ public sealed class QueryService
 
         var response = await _erpNextClient.GetAsync<JsonElement>(resourcePath, cancellationToken);
 
-        if (response.StatusCode != 200 || response.Data is null)
+        if (response.StatusCode != 200 || response.Data.ValueKind == JsonValueKind.Undefined)
         {
             throw new InvalidOperationException($"ERPNext query failed: {response.Message}");
         }
 
         // Parse ERPNext response
-        var result = ParseErpNextListResponse(response.Data.Value, request);
+        var result = ParseErpNextListResponse(response.Data, request);
 
         // Cache with TTL 5 min for lists
         if (!bypassCache)
@@ -91,10 +87,10 @@ public sealed class QueryService
 
         if (!bypassCache)
         {
-            var cached = await _cacheService.GetAsync<JsonElement?>(cacheKey, cancellationToken);
-            if (cached is not null)
+            JsonElement? cached = await _cacheService.GetAsync<JsonElement>(cacheKey, cancellationToken);
+            if (cached.HasValue)
             {
-                return cached.Value;
+                return cached.GetValueOrDefault();
             }
         }
 
@@ -105,7 +101,7 @@ public sealed class QueryService
             throw new KeyNotFoundException($"Document {doctype}/{name} not found");
         }
 
-        if (response.StatusCode != 200 || response.Data is null)
+        if (response.StatusCode != 200 || response.Data.ValueKind == JsonValueKind.Undefined)
         {
             throw new InvalidOperationException($"ERPNext query failed: {response.Message}");
         }
@@ -113,12 +109,12 @@ public sealed class QueryService
         // Cache with TTL 1 min for single docs
         if (!bypassCache)
         {
-            await _cacheService.SetAsync(cacheKey, response.Data.Value, TimeSpan.FromMinutes(1), cancellationToken);
+            await _cacheService.SetAsync(cacheKey, response.Data, TimeSpan.FromMinutes(1), cancellationToken);
         }
 
         await WriteAuditAsync(tenantId, GetUserId(), "GET", $"/api/v1/query/{doctype}/{name}", 200, sw.ElapsedMilliseconds, cancellationToken);
 
-        return response.Data.Value;
+        return response.Data;
     }
 
     public async Task<object> CountAsync(string doctype, CancellationToken cancellationToken)
@@ -136,13 +132,13 @@ public sealed class QueryService
 
         var response = await _erpNextClient.GetAsync<JsonElement>($"{doctype}?limit_page_length=1&fields=[\"count(*)\"]", cancellationToken);
 
-        if (response.StatusCode != 200 || response.Data is null)
+        if (response.StatusCode != 200 || response.Data.ValueKind == JsonValueKind.Undefined)
         {
             throw new InvalidOperationException($"ERPNext count query failed: {response.Message}");
         }
 
         long count = 0;
-        var data = response.Data.Value;
+        var data = response.Data;
         if (data.ValueKind == JsonValueKind.Array && data.GetArrayLength() > 0)
         {
             var first = data[0];
@@ -243,8 +239,8 @@ public sealed class QueryService
     {
         var auditLog = new AuditLog
         {
-            LogId = Ulid.NewUlid().ToString(),
-            RequestId = Ulid.NewUlid().ToString(),
+            LogId = UlidGenerator.Generate(),
+            RequestId = UlidGenerator.Generate(),
             TenantId = tenantId,
             UserId = userId,
             Method = method,
@@ -254,8 +250,7 @@ public sealed class QueryService
             CreatedAt = DateTimeOffset.UtcNow
         };
 
-        _dbContext.AuditLogs.Add(auditLog);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        await _repository.CreateAuditLogAsync(auditLog, cancellationToken);
     }
 
     private string GetTenantId() =>

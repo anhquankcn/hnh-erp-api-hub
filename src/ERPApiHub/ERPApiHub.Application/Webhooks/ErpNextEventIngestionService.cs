@@ -1,11 +1,11 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using ERPApiHub.Infrastructure.Data;
-using ERPApiHub.Infrastructure.Messaging;
+using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Domain;
+using ERPApiHub.Domain.Entities;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using RabbitMQ.Client;
 
 namespace ERPApiHub.Application.Webhooks;
 
@@ -16,23 +16,19 @@ namespace ERPApiHub.Application.Webhooks;
 /// </summary>
 public sealed class ErpNextEventIngestionService
 {
-    private readonly ErpHubDbContext _dbContext;
-    private readonly IRabbitMqConnectionFactory _connectionFactory;
-    private readonly RabbitMqOptions _rabbitMqOptions;
+    private readonly IErpHubRepository _repository;
+    private readonly IMessageBus _messageBus;
     private readonly ErpNextEventOptions _eventOptions;
     private readonly ILogger<ErpNextEventIngestionService> _logger;
-    private IConnection? _connection;
 
     public ErpNextEventIngestionService(
-        ErpHubDbContext dbContext,
-        IRabbitMqConnectionFactory connectionFactory,
-        IOptions<RabbitMqOptions> rabbitMqOptions,
+        IErpHubRepository repository,
+        IMessageBus messageBus,
         IOptions<ErpNextEventOptions> eventOptions,
         ILogger<ErpNextEventIngestionService> logger)
     {
-        _dbContext = dbContext;
-        _connectionFactory = connectionFactory;
-        _rabbitMqOptions = rabbitMqOptions.Value;
+        _repository = repository;
+        _messageBus = messageBus;
         _eventOptions = eventOptions.Value;
         _logger = logger;
     }
@@ -49,170 +45,91 @@ public sealed class ErpNextEventIngestionService
             if (_eventOptions.SkipSignatureValidation)
             {
                 _logger.LogWarning(
-                    "Signature validation explicitly skipped (SkipSignatureValidation=true). DO NOT use in production.");
+                    "Signature validation explicitly skipped due to SkipSignatureValidation=true");
                 return true;
             }
 
             return false;
         }
 
-        // Expected format: "sha256={hex_digest}"
-        if (!signatureHeader.StartsWith("sha256=", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
+        var secretBytes = Encoding.UTF8.GetBytes(_eventOptions.SharedSecret);
+        var payloadBytes = Encoding.UTF8.GetBytes(payload);
 
-        var expectedHex = signatureHeader["sha256=".Length..];
-
-        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(_eventOptions.SharedSecret));
-        var computedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes(payload));
-        var computedHex = Convert.ToHexString(computedHash).ToLowerInvariant();
+        using var hmac = new HMACSHA256(secretBytes);
+        var hash = hmac.ComputeHash(payloadBytes);
+        var expectedSignature = $"sha256={Convert.ToHexString(hash).ToLowerInvariant()}";
 
         return CryptographicOperations.FixedTimeEquals(
-            Encoding.UTF8.GetBytes(computedHex),
-            Encoding.UTF8.GetBytes(expectedHex.ToLowerInvariant()));
+            Encoding.UTF8.GetBytes(expectedSignature),
+            Encoding.UTF8.GetBytes(signatureHeader));
     }
 
     /// <summary>
-    /// Validate event envelope structure.
+    /// Process validated event: store and publish to message bus.
     /// </summary>
-    public (bool IsValid, string? Error) ValidateEnvelope(JsonElement envelope)
+    public async Task<IngestEventResult> IngestEventAsync(
+        string eventType,
+        string payload,
+        string? signatureHeader,
+        CancellationToken ct)
     {
-        if (!envelope.TryGetProperty("eventId", out var eventIdElem) ||
-            eventIdElem.ValueKind != JsonValueKind.String)
+        // Validate signature
+        if (!string.IsNullOrWhiteSpace(signatureHeader) && !ValidateSignature(payload, signatureHeader))
         {
-            return (false, "eventId is required and must be a string.");
+            _logger.LogWarning("Invalid HMAC signature for event type {EventType}", eventType);
+            return new IngestEventResult(false, "Invalid signature", null);
         }
 
-        var eventId = eventIdElem.GetString()!;
-        if (eventId.Length != 26)
+        // Parse payload
+        JsonElement data;
+        try
         {
-            return (false, "eventId must be a 26-character ULID.");
+            data = JsonSerializer.Deserialize<JsonElement>(payload);
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse event payload");
+            return new IngestEventResult(false, "Invalid JSON payload", null);
         }
 
-        if (!envelope.TryGetProperty("eventType", out var eventTypeElem) ||
-            eventTypeElem.ValueKind != JsonValueKind.String ||
-            string.IsNullOrWhiteSpace(eventTypeElem.GetString()))
+        // Create processed event record
+        var processedEventId = UlidGenerator.Generate();
+        var processedEvent = new ErpProcessedEvent
         {
-            return (false, "eventType is required.");
-        }
-
-        if (!envelope.TryGetProperty("source", out var sourceElem) ||
-            sourceElem.ValueKind != JsonValueKind.String ||
-            string.IsNullOrWhiteSpace(sourceElem.GetString()))
-        {
-            return (false, "source is required.");
-        }
-
-        if (!envelope.TryGetProperty("correlationId", out var correlationIdElem) ||
-            correlationIdElem.ValueKind != JsonValueKind.String ||
-            string.IsNullOrWhiteSpace(correlationIdElem.GetString()))
-        {
-            return (false, "correlationId is required.");
-        }
-
-        if (!envelope.TryGetProperty("timestamp", out var timestampElem) ||
-            !timestampElem.TryGetDateTimeOffset(out var _))
-        {
-            return (false, "timestamp must be a valid ISO-8601 timestamp.");
-        }
-
-        if (!envelope.TryGetProperty("payload", out _))
-        {
-            return (false, "payload is required.");
-        }
-
-        return (true, null);
-    }
-
-    /// <summary>
-    /// Process a validated event: publish to RabbitMQ for webhook dispatch.
-    /// </summary>
-    public async Task ProcessEventAsync(JsonElement envelope, CancellationToken ct)
-    {
-        var eventType = envelope.GetProperty("eventType").GetString()!;
-        var eventId = envelope.GetProperty("eventId").GetString()!;
-        var source = envelope.GetProperty("source").GetString()!;
-        var correlationId = envelope.GetProperty("correlationId").GetString()!;
-
-        var routingKey = $"erphub.webhook.{eventType.Replace('_', '.')}";
-
-        _logger.LogInformation(
-            "Processing ERPNext event {EventId} type {EventType} from {Source}",
-            eventId, eventType, source);
-
-        // Publish to RabbitMQ
-        var connection = await GetConnectionAsync(ct);
-        await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
-
-        await channel.ExchangeDeclareAsync(
-            exchange: _rabbitMqOptions.ExchangeName,
-            type: ExchangeType.Topic,
-            durable: true,
-            autoDelete: false,
-            cancellationToken: ct);
-
-        // Declare webhook delivery queue
-        await channel.QueueDeclareAsync(
-            queue: "erphub.webhook.delivery",
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            cancellationToken: ct);
-
-        // Bind to webhook routing keys
-        await channel.QueueBindAsync(
-            queue: "erphub.webhook.delivery",
-            exchange: _rabbitMqOptions.ExchangeName,
-            routingKey: "erphub.webhook.#",
-            cancellationToken: ct);
-
-        var body = Encoding.UTF8.GetBytes(envelope.GetRawText());
-        var properties = new BasicProperties
-        {
-            ContentType = "application/json",
-            DeliveryMode = 2, // persistent
-            MessageId = eventId,
-            CorrelationId = correlationId
+            ErpProcessedEventId = processedEventId,
+            Source = "erpnext-webhook",
+            EventType = eventType,
+            ProcessedAt = DateTimeOffset.UtcNow
         };
 
-        await channel.BasicPublishAsync(
-            exchange: _rabbitMqOptions.ExchangeName,
-            routingKey: routingKey,
-            mandatory: false,
-            basicProperties: properties,
-            body: body,
-            cancellationToken: ct);
+        await _repository.CreateProcessedEventAsync(processedEvent, ct);
 
-        // Write audit log
-        var auditLog = new Domain.Entities.AuditLog
-        {
-            LogId = NetUlid.Ulid.NewUlid().ToString(),
-            RequestId = correlationId,
-            TenantId = source,
-            UserId = "erpnext-server-script",
-            Method = "POST",
-            Endpoint = "/internal/v1/events/ingest",
-            StatusCode = 202,
-            DurationMs = 0,
-            CreatedAt = DateTime.UtcNow
-        };
+        // Publish to message bus for webhook dispatch
+        var envelope = new ErpEventEnvelope(
+            EventId: processedEventId,
+            EventType: eventType,
+            Timestamp: DateTimeOffset.UtcNow,
+            Payload: data,
+            CorrelationId: null);
 
-        _dbContext.AuditLogs.Add(auditLog);
-        await _dbContext.SaveChangesAsync(ct);
+        await _messageBus.PublishAsync(
+            "erphub.events",
+            $"event.{eventType}",
+            envelope,
+            ct);
 
         _logger.LogInformation(
-            "Event {EventId} published to {Exchange} with routing key {RoutingKey}",
-            eventId, _rabbitMqOptions.ExchangeName, routingKey);
-    }
+            "ERPNext event {EventId} of type {EventType} ingested and published",
+            processedEventId, eventType);
 
-    private async Task<IConnection> GetConnectionAsync(CancellationToken ct)
-    {
-        if (_connection is null || !_connection.IsOpen)
-        {
-            _connection = await _connectionFactory.CreateConnectionAsync(ct);
-        }
-
-        return _connection;
+        return new IngestEventResult(true, null, processedEventId);
     }
 }
+
+public sealed record IngestEventResult(bool Success, string? Error, string? EventId);
+public sealed record ErpEventEnvelope(
+    string EventId,
+    string EventType,
+    DateTimeOffset Timestamp,
+    JsonElement Payload,
+    string? CorrelationId);

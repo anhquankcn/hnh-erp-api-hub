@@ -1,4 +1,5 @@
 using ERPApiHub.Application.RateLimiting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Moq;
 using StackExchange.Redis;

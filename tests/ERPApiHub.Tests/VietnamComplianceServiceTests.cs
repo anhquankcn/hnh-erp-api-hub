@@ -46,9 +46,9 @@ public class VietnamComplianceServiceTests
     public void ValidateTaxId_WithBranchSuffix_Valid()
     {
         // 10-digit base + -001 suffix format
-        var (isValid, _) = _service.ValidateTaxId("0101182234-001");
+        var (isValid, error) = _service.ValidateTaxId("0101182234-001");
         // Branch suffix format is valid even if check digit fails for test data
-        Assert.True(isValid || _.Contains("check digit"));
+        Assert.True(isValid || error!.Contains("check digit"));
     }
 
     [Fact]

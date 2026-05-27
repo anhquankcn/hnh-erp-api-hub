@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Webhooks;
+using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
 using ERPApiHub.Infrastructure.Data;
 using ERPApiHub.Infrastructure.Messaging;
@@ -124,7 +125,7 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
         JsonElement envelope;
         try
         {
-            using var doc = JsonDocument.Parse(args.Body.Span);
+            using var doc = JsonDocument.Parse(args.Body);
             envelope = doc.RootElement.Clone();
         }
         catch (JsonException ex)
@@ -210,7 +211,7 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
         byte[] payloadBytes,
         CancellationToken ct)
     {
-        var deliveryId = NetUlid.Ulid.NewUlid().ToString();
+        var deliveryId = UlidGenerator.Generate();
         var now = DateTime.UtcNow;
 
         var delivery = new WebhookDelivery
@@ -219,7 +220,8 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
             SubscriptionId = subscription.SubscriptionId,
             EventType = eventType,
             Payload = payloadString,
-            StatusCode = 0,
+            Status = "Pending",
+            HttpStatus = 0,
             ResponseBody = null,
             AttemptCount = 0,
             NextRetryAt = null,
@@ -265,7 +267,7 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
             var response = await client.PostAsync(subscription.WebhookUrl, content, ct);
             var responseBody = await response.Content.ReadAsStringAsync(ct);
 
-            delivery.StatusCode = (int)response.StatusCode;
+            delivery.HttpStatus = (int)response.StatusCode;
             delivery.ResponseBody = responseBody.Length > 2000 ? responseBody[..2000] : responseBody;
             delivery.AttemptCount = 1;
             delivery.NextRetryAt = null;

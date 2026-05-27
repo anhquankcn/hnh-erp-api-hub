@@ -28,6 +28,8 @@ public static class DependencyInjection
         var redisConnectionString = BuildRedisConnectionString(configuration);
         services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnectionString));
         services.AddScoped<IRedisCacheService, RedisCacheService>();
+        services.AddScoped<ICacheService, RedisCacheService>();
+        services.AddScoped<IErpHubRepository, ErpHubRepository>();
 
         // ERPNext HTTP Client with Polly retry
         var erpNextOptions = configuration.GetSection(ErpNextOptions.SectionName).Get<ErpNextOptions>() ?? new();
@@ -58,6 +60,7 @@ public static class DependencyInjection
             .AddRedis(redisConnectionString, name: "redis", tags: ["ready", "startup"]);
 
         services.AddSingleton<IRabbitMqConnectionFactory, RabbitMqConnectionFactory>();
+        services.AddSingleton<IMessageBus, RabbitMqMessageBus>();
 
         return services;
     }

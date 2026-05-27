@@ -1,16 +1,10 @@
 using System.Security.Claims;
-using System.Text;
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
-using ERPApiHub.Infrastructure.Caching;
-using ERPApiHub.Infrastructure.Data;
-using ERPApiHub.Infrastructure.Messaging;
 using Microsoft.AspNetCore.Http;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using RabbitMQ.Client;
 
 namespace ERPApiHub.Application.Ingestion;
 
@@ -55,30 +49,27 @@ public sealed record JobStatusResponse(
 public sealed class IngestionService : IIngestionService
 {
     private readonly IAllowedDoctypeValidator _doctypeValidator;
-    private readonly IRedisCacheService _cache;
-    private readonly ErpHubDbContext _dbContext;
+    private readonly ICacheService _cache;
+    private readonly IErpHubRepository _repository;
     private readonly IHttpContextAccessor _httpContextAccessor;
-    private readonly IRabbitMqConnectionFactory _rabbitMqFactory;
-    private readonly IOptions<RabbitMqOptions> _rabbitMqOptions;
+    private readonly IMessageBus _messageBus;
     private readonly ILogger<IngestionService> _logger;
     private static readonly TimeSpan IdempotencyTtl = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan JobTtl = TimeSpan.FromHours(24);
 
     public IngestionService(
         IAllowedDoctypeValidator doctypeValidator,
-        IRedisCacheService cache,
-        ErpHubDbContext dbContext,
+        ICacheService cache,
+        IErpHubRepository repository,
         IHttpContextAccessor httpContextAccessor,
-        IRabbitMqConnectionFactory rabbitMqFactory,
-        IOptions<RabbitMqOptions> rabbitMqOptions,
+        IMessageBus messageBus,
         ILogger<IngestionService> logger)
     {
         _doctypeValidator = doctypeValidator;
         _cache = cache;
-        _dbContext = dbContext;
+        _repository = repository;
         _httpContextAccessor = httpContextAccessor;
-        _rabbitMqFactory = rabbitMqFactory;
-        _rabbitMqOptions = rabbitMqOptions;
+        _messageBus = messageBus;
         _logger = logger;
     }
 
@@ -304,10 +295,6 @@ public sealed class IngestionService : IIngestionService
         string tenantId,
         CancellationToken cancellationToken)
     {
-        var options = _rabbitMqOptions.Value;
-        await using var connection = await _rabbitMqFactory.CreateConnectionAsync(cancellationToken);
-        await using var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
-
         var envelope = new ErpEventEnvelope(
             jobId,
             $"erphub.ingestion.{doctype}.{action}",
@@ -317,28 +304,12 @@ public sealed class IngestionService : IIngestionService
             "1",
             payload);
 
-        var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(envelope, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
-
-        var properties = new BasicProperties
-        {
-            ContentType = "application/json",
-            DeliveryMode = DeliveryModes.Persistent,
-            MessageId = jobId,
-            CorrelationId = correlationId
-        };
-
-        await channel.BasicPublishAsync(
-            options.ExchangeName,
-            $"erphub.ingestion.{doctype}.{action}",
-            false,
-            properties,
-            body,
-            cancellationToken);
+        var routingKey = $"erphub.ingestion.{doctype}.{action}";
+        await _messageBus.PublishAsync(string.Empty, routingKey, envelope, cancellationToken);
 
         _logger.LogInformation(
-            "Published event to {Exchange} with routing key {RoutingKey} for job {JobId}",
-            options.ExchangeName,
-            $"erphub.ingestion.{doctype}.{action}",
+            "Published event with routing key {RoutingKey} for job {JobId}",
+            routingKey,
             jobId);
     }
 
@@ -366,8 +337,7 @@ public sealed class IngestionService : IIngestionService
             CreatedAt = DateTimeOffset.UtcNow
         };
 
-        _dbContext.AuditLogs.Add(auditLog);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        await _repository.CreateAuditLogAsync(auditLog, cancellationToken);
     }
 
     private string GetTenantId()

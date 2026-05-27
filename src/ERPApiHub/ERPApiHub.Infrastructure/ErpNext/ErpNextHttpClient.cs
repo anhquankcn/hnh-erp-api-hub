@@ -9,6 +9,7 @@ using ERPApiHub.Infrastructure.Data;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Polly;
@@ -100,10 +101,10 @@ public sealed class ErpNextHttpClient : IErpNextClient
             {
                 var response = await client.GetAsync("/api/resource/DocType?fields=[\"name\"]&limit_page_length=0", ct);
                 var result = await HandleResponseAsync<JsonElement>(response, ct);
-                if (result.Data is null || result.Data.ValueKind != JsonValueKind.Object)
+                if (result.Data.ValueKind == JsonValueKind.Undefined || result.Data.ValueKind != JsonValueKind.Object)
                     return new ErpNextResponse<JsonElement[]>(null, result.StatusCode, result.Message);
 
-                if (result.Data.Value.TryGetProperty("data", out var dataArray) && dataArray.ValueKind == JsonValueKind.Array)
+                if (result.Data.TryGetProperty("data", out var dataArray) && dataArray.ValueKind == JsonValueKind.Array)
                 {
                     var docTypes = new List<JsonElement>();
                     foreach (var item in dataArray.EnumerateArray())
@@ -143,7 +144,7 @@ public sealed class ErpNextHttpClient : IErpNextClient
         var scopedClient = new HttpClient
         {
             BaseAddress = new Uri($"https://{tenant.ErpNextHost}"),
-            Timeout = _options.Timeout
+            Timeout = TimeSpan.FromSeconds(_options.TimeoutSeconds > 0 ? _options.TimeoutSeconds : 30)
         };
         scopedClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", authValue);
         scopedClient.DefaultRequestHeaders.Add("X-Frappe-Site-Name", tenant.SiteName);

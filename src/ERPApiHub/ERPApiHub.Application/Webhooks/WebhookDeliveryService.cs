@@ -1,30 +1,31 @@
 using System.Text;
-using System.Text.Json;
+using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
-using ERPApiHub.Infrastructure.Data;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using NetUlid;
 
 namespace ERPApiHub.Application.Webhooks;
 
 public sealed class WebhookDeliveryService
 {
-    private readonly ErpHubDbContext _dbContext;
+    private readonly IErpHubRepository _repository;
+    private readonly IMessageBus _messageBus;
     private readonly WebhookSignatureService _signatureService;
     private readonly IDataProtector _dataProtector;
     private readonly HttpClient _httpClient;
     private readonly ILogger<WebhookDeliveryService> _logger;
 
     public WebhookDeliveryService(
-        ErpHubDbContext dbContext,
+        IErpHubRepository repository,
+        IMessageBus messageBus,
         WebhookSignatureService signatureService,
         IDataProtectionProvider dataProtectionProvider,
         IHttpClientFactory httpClientFactory,
         ILogger<WebhookDeliveryService> logger)
     {
-        _dbContext = dbContext;
+        _repository = repository;
+        _messageBus = messageBus;
         _signatureService = signatureService;
         _dataProtector = dataProtectionProvider.CreateProtector("WebhookSecret");
         _httpClient = httpClientFactory.CreateClient("WebhookDelivery");
@@ -47,7 +48,7 @@ public sealed class WebhookDeliveryService
         }
 
         var signature = secret is not null ? _signatureService.ComputeSignature(payload, secret) : "";
-        var deliveryId = Ulid.NewUlid().ToString();
+        var deliveryId = UlidGenerator.Generate();
 
         var delivery = new WebhookDelivery
         {
@@ -56,8 +57,6 @@ public sealed class WebhookDeliveryService
             Status = "pending",
             AttemptedAt = DateTimeOffset.UtcNow
         };
-
-        _dbContext.WebhookDeliveries.Add(delivery);
 
         var maxRetries = 3;
         var retryDelay = TimeSpan.FromSeconds(2);
@@ -117,15 +116,11 @@ public sealed class WebhookDeliveryService
             _logger.LogError("Webhook delivery failed after {Max} retries for subscription {SubId}", maxRetries, subscription.SubscriptionId);
         }
 
-        await _dbContext.SaveChangesAsync(ct);
+        await _repository.CreateWebhookDeliveryAsync(delivery, ct);
     }
 
     public async Task<List<WebhookDelivery>> ListDeliveriesAsync(string subscriptionId, CancellationToken ct)
     {
-        return await _dbContext.WebhookDeliveries
-            .Where(d => d.SubscriptionId == subscriptionId)
-            .OrderByDescending(d => d.AttemptedAt)
-            .Take(100)
-            .ToListAsync(ct);
+        return [.. await _repository.GetWebhookDeliveriesAsync(subscriptionId, pageSize: 100, cancellationToken: ct)];
     }
 }

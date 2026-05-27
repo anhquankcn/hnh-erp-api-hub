@@ -107,7 +107,7 @@ public sealed class ErpIngestionConsumer(
         ErpEventEnvelope? envelope;
         try
         {
-            envelope = DeserializeEnvelope(args.Body.Span);
+            envelope = DeserializeEnvelope(args.Body);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException)
         {
@@ -173,7 +173,7 @@ public sealed class ErpIngestionConsumer(
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    private static ErpEventEnvelope DeserializeEnvelope(ReadOnlySpan<byte> body)
+    private static ErpEventEnvelope DeserializeEnvelope(ReadOnlyMemory<byte> body)
     {
         using var document = JsonDocument.Parse(body);
         var root = document.RootElement;

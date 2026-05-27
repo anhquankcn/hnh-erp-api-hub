@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using ERPApiHub.Application.Audit;
 using ERPApiHub.Application.Compliance;
@@ -112,27 +113,28 @@ app.MapPost("/api/v1/ingest/{doctype}", async (string doctype, IngestionRequest 
 {
     var idempotencyKey = ctx.Request.Headers["X-Idempotency-Key"].FirstOrDefault();
     var fullRequest = request with { Doctype = doctype, IdempotencyKey = idempotencyKey };
-    var response = await service.IngestAsync(fullRequest, ct);
+    var response = await service.IngestAsync(fullRequest.Doctype, fullRequest.Payload, fullRequest.Name, ct);
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
 }).RequireAuthorization("api-hub:write");
 
 app.MapPut("/api/v1/ingest/{doctype}/{name}", async (string doctype, string name, JsonElement payload, IngestionService service, HttpContext ctx, CancellationToken ct) =>
 {
-    var idempotencyKey = ctx.Request.Headers["X-Idempotency-Key"].FirstOrDefault();
-    var response = await service.UpdateAsync(doctype, name, payload, idempotencyKey, ct);
+    var response = await service.UpdateAsync(doctype, name, payload, ct);
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
 }).RequireAuthorization("api-hub:write");
 
 app.MapDelete("/api/v1/ingest/{doctype}/{name}", async (string doctype, string name, IngestionService service, HttpContext ctx, CancellationToken ct) =>
 {
-    var idempotencyKey = ctx.Request.Headers["X-Idempotency-Key"].FirstOrDefault();
-    var response = await service.DeleteAsync(doctype, name, idempotencyKey, ct);
+    var response = await service.DeleteAsync(doctype, name, ct);
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
 }).RequireAuthorization("api-hub:write");
 
 app.MapPost("/api/v1/ingest/batch", async (List<IngestionRequest> operations, IngestionService service, CancellationToken ct) =>
 {
-    var response = await service.BatchIngestAsync(operations, ct);
+    var batchOperations = operations
+        .Select(op => new BatchOperation(op.Doctype, op.Payload, op.Name))
+        .ToList();
+    var response = await service.BatchIngestAsync(batchOperations, ct);
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
 }).RequireAuthorization("api-hub:write");
 
@@ -268,13 +270,13 @@ app.MapPost("/internal/v1/events/ingest", async (HttpContext ctx, ErpNextEventIn
         return Results.BadRequest(new { error = "Invalid JSON payload." });
     }
 
-    var (isValid, validationError) = service.ValidateEnvelope(envelope);
-    if (!isValid)
-    {
-        return Results.BadRequest(new { error = validationError });
-    }
+    var eventType = envelope.TryGetProperty("eventType", out var eventTypeElement)
+        && eventTypeElement.ValueKind == JsonValueKind.String
+        && !string.IsNullOrWhiteSpace(eventTypeElement.GetString())
+            ? eventTypeElement.GetString()!
+            : "erpnext.event";
 
-    await service.ProcessEventAsync(envelope, ct);
+    await service.IngestEventAsync(eventType, rawBody, null, ct);
     return Results.Accepted(null, new { status = "accepted" });
 }).AllowAnonymous();
 
@@ -363,6 +365,21 @@ app.MapHealthChecks("/health", new HealthCheckOptions
 
 app.Run();
 
+static Task WriteHealthCheckResponseAsync(HttpContext context, HealthReport report)
+{
+    context.Response.ContentType = "application/json";
+
+    var payload = new
+    {
+        status = report.Status.ToString(),
+        checks = report.Entries.ToDictionary(
+            entry => entry.Key,
+            entry => entry.Value.Status.ToString())
+    };
+
+    return JsonSerializer.SerializeAsync(context.Response.Body, payload);
+}
+
 // ─── Request DTOs ───
 
 public sealed record CreateWebhookSubscriptionRequest
@@ -394,19 +411,4 @@ public sealed record TaxIdValidationRequest
 public sealed record InvoiceTemplateValidationRequest
 {
     public string Template { get; init; } = string.Empty;
-}
-
-static Task WriteHealthCheckResponseAsync(HttpContext context, HealthReport report)
-{
-    context.Response.ContentType = "application/json";
-
-    var payload = new
-    {
-        status = report.Status.ToString(),
-        checks = report.Entries.ToDictionary(
-            entry => entry.Key,
-            entry => entry.Value.Status.ToString())
-    };
-
-    return JsonSerializer.SerializeAsync(context.Response.Body, payload);
 }

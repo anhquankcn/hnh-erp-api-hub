@@ -1,3 +1,10 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using OpenTelemetry;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+
 namespace ERPApiHub.Application.Observability;
 
 /// <summary>
@@ -36,8 +43,7 @@ public static class ObservabilityExtensions
                                 request.HttpContext.User?.FindFirst("BranchId")?.Value ?? "anonymous");
                         };
                     })
-                    .AddHttpClientInstrumentation()
-                    .AddRedisInstrumentation(); // StackExchange.Redis if used
+                    .AddHttpClientInstrumentation();
 
                 if (!string.IsNullOrWhiteSpace(otlpEndpoint))
                 {

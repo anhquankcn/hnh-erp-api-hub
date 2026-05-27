@@ -1,0 +1,13 @@
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ERPApiHub.Domain.csproj.AssemblyReference.cache
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ERPApiHub.Domain.GeneratedMSBuildEditorConfig.editorconfig
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ERPApiHub.Domain.AssemblyInfoInputs.cache
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ERPApiHub.Domain.AssemblyInfo.cs
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ERPApiHub.Domain.csproj.CoreCompileInputs.cache
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ERPApiHub.Domain.sourcelink.json
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/bin/Debug/net9.0/ERPApiHub.Domain.deps.json
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/bin/Debug/net9.0/ERPApiHub.Domain.dll
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/bin/Debug/net9.0/ERPApiHub.Domain.pdb
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ERPApiHub.Domain.dll
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/refint/ERPApiHub.Domain.dll
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ERPApiHub.Domain.pdb
+/Users/quanna/erp-api-hub/src/ERPApiHub/ERPApiHub.Domain/obj/Debug/net9.0/ref/ERPApiHub.Domain.dll

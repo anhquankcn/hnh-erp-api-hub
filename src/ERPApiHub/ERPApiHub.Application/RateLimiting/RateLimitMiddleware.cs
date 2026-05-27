@@ -1,11 +1,10 @@
 using System.Text.Json;
+using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Errors;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using ERPApiHub.Infrastructure.Data;
-using Microsoft.EntityFrameworkCore;
-using StackExchange.Redis;
 
 namespace ERPApiHub.Application.RateLimiting;
 
@@ -28,6 +27,8 @@ public sealed class RateLimitMiddleware
     {
         var rateLimitService = context.RequestServices.GetRequiredService<RateLimitService>();
         var options = context.RequestServices.GetRequiredService<IOptions<RateLimitOptions>>().Value;
+        var cacheService = context.RequestServices.GetRequiredService<ICacheService>();
+        var repository = context.RequestServices.GetRequiredService<IErpHubRepository>();
 
         if (!options.Enabled)
         {
@@ -63,23 +64,18 @@ public sealed class RateLimitMiddleware
         {
             try
             {
-                var redis = context.RequestServices.GetRequiredService<IConnectionMultiplexer>();
-                var cached = await redis.GetDatabase().StringGetAsync(GetTierCacheKey(tenantId));
+                var cached = await cacheService.GetAsync<CachedRateLimitSystem>(GetTierCacheKey(tenantId));
 
-                if (cached.HasValue)
+                if (cached is not null)
                 {
-                    var cachedSystem = JsonSerializer.Deserialize<CachedRateLimitSystem>(cached.ToString());
-                    if (cachedSystem is not null)
-                    {
-                        tier = rateLimitService.ResolveTier(cachedSystem.RateLimitTier);
-                        systemId = cachedSystem.SystemId;
-                        tierResolvedFromCache = true;
-                    }
+                    tier = rateLimitService.ResolveTier(cached.RateLimitTier);
+                    systemId = cached.SystemId;
+                    tierResolvedFromCache = true;
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Redis cache read failed for rate limit tier resolution. Falling through to DB.");
+                _logger.LogWarning(ex, "Cache read failed for rate limit tier resolution. Falling through to DB.");
             }
         }
 
@@ -87,13 +83,10 @@ public sealed class RateLimitMiddleware
         {
             try
             {
-                var dbContext = context.RequestServices.GetRequiredService<ErpHubDbContext>();
                 if (!string.IsNullOrWhiteSpace(tenantId))
                 {
-                    var system = await dbContext.ExternalSystems
-                        .AsNoTracking()
-                        .Where(s => s.TenantId == tenantId && s.IsActive && s.DeletedAt == null)
-                        .FirstOrDefaultAsync(context.RequestAborted);
+                    var systems = await repository.GetExternalSystemsByTenantAsync(tenantId, context.RequestAborted);
+                    var system = systems.FirstOrDefault(s => s.IsActive && s.DeletedAt == null);
 
                     if (system is not null)
                     {
@@ -102,16 +95,15 @@ public sealed class RateLimitMiddleware
 
                         try
                         {
-                            var redis = context.RequestServices.GetRequiredService<IConnectionMultiplexer>();
                             var cachedSystem = new CachedRateLimitSystem(system.SystemId, system.RateLimitTier);
-                            await redis.GetDatabase().StringSetAsync(
+                            await cacheService.SetAsync(
                                 GetTierCacheKey(tenantId),
-                                JsonSerializer.Serialize(cachedSystem),
+                                cachedSystem,
                                 TimeSpan.FromSeconds(60));
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogWarning(ex, "Redis cache write failed for rate limit tier resolution.");
+                            _logger.LogWarning(ex, "Cache write failed for rate limit tier resolution.");
                         }
                     }
                 }

@@ -1,27 +1,24 @@
-using System.Net;
 using System.Text;
-using System.Text.Json;
+using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
-using ERPApiHub.Infrastructure.Data;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using NetUlid;
 
 namespace ERPApiHub.Application.Webhooks;
 
 public sealed class WebhookSubscriptionService
 {
-    private readonly ErpHubDbContext _dbContext;
+    private readonly IErpHubRepository _repository;
     private readonly IDataProtector _dataProtector;
     private readonly ILogger<WebhookSubscriptionService> _logger;
 
     public WebhookSubscriptionService(
-        ErpHubDbContext dbContext,
+        IErpHubRepository repository,
         IDataProtectionProvider dataProtectionProvider,
         ILogger<WebhookSubscriptionService> logger)
     {
-        _dbContext = dbContext;
+        _repository = repository;
         _dataProtector = dataProtectionProvider.CreateProtector("WebhookSecret");
         _logger = logger;
     }
@@ -30,7 +27,7 @@ public sealed class WebhookSubscriptionService
     {
         var subscription = new WebhookSubscription
         {
-            SubscriptionId = Ulid.NewUlid().ToString(),
+            SubscriptionId = UlidGenerator.Generate(),
             SystemId = systemId,
             EventTypes = eventTypes,
             WebhookUrl = webhookUrl,
@@ -42,8 +39,7 @@ public sealed class WebhookSubscriptionService
             subscription.SecretEncrypted = _dataProtector.Protect(Encoding.UTF8.GetBytes(secret));
         }
 
-        _dbContext.WebhookSubscriptions.Add(subscription);
-        await _dbContext.SaveChangesAsync(ct);
+        await _repository.CreateWebhookSubscriptionAsync(subscription, ct);
 
         _logger.LogInformation("Created webhook subscription {SubId} for system {SysId}", subscription.SubscriptionId, systemId);
         return subscription;
@@ -51,48 +47,41 @@ public sealed class WebhookSubscriptionService
 
     public async Task<List<WebhookSubscription>> ListByTenantAsync(string tenantId, CancellationToken ct)
     {
-        return await _dbContext.WebhookSubscriptions
-            .Include(s => s.ExternalSystem)
-            .Where(s => s.ExternalSystem != null && s.ExternalSystem.TenantId == tenantId && s.IsActive)
-            .OrderByDescending(s => s.CreatedAt)
-            .ToListAsync(ct);
+        return [.. await _repository.GetWebhookSubscriptionsByTenantAsync(tenantId, ct)];
     }
 
     public async Task<WebhookSubscription?> GetByIdAsync(string subscriptionId, CancellationToken ct)
     {
-        return await _dbContext.WebhookSubscriptions
-            .FirstOrDefaultAsync(s => s.SubscriptionId == subscriptionId && s.DeletedAt == null, ct);
+        return await _repository.GetWebhookSubscriptionAsync(subscriptionId, ct);
     }
 
     public async Task<WebhookSubscription> UpdateAsync(string subscriptionId, string[]? eventTypes, string? webhookUrl, string? secret, CancellationToken ct)
     {
-        var subscription = await _dbContext.WebhookSubscriptions.FindAsync([subscriptionId], ct)
+        var subscription = await _repository.GetWebhookSubscriptionAsync(subscriptionId, ct)
             ?? throw new KeyNotFoundException($"Subscription {subscriptionId} not found");
 
         if (eventTypes is not null) subscription.EventTypes = eventTypes;
         if (webhookUrl is not null) subscription.WebhookUrl = webhookUrl;
         if (secret is not null) subscription.SecretEncrypted = _dataProtector.Protect(Encoding.UTF8.GetBytes(secret));
 
-        await _dbContext.SaveChangesAsync(ct);
+        await _repository.UpdateWebhookSubscriptionAsync(subscription, ct);
         return subscription;
     }
 
     public async Task DeleteAsync(string subscriptionId, CancellationToken ct)
     {
-        var subscription = await _dbContext.WebhookSubscriptions.FindAsync([subscriptionId], ct)
+        var subscription = await _repository.GetWebhookSubscriptionAsync(subscriptionId, ct)
             ?? throw new KeyNotFoundException($"Subscription {subscriptionId} not found");
 
         subscription.DeletedAt = DateTimeOffset.UtcNow;
         subscription.IsActive = false;
-        await _dbContext.SaveChangesAsync(ct);
+        await _repository.UpdateWebhookSubscriptionAsync(subscription, ct);
 
         _logger.LogInformation("Soft-deleted webhook subscription {SubId}", subscriptionId);
     }
 
     public async Task<List<WebhookSubscription>> FindMatchingSubscriptionsAsync(string eventType, CancellationToken ct)
     {
-        return await _dbContext.WebhookSubscriptions
-            .Where(s => s.IsActive && s.EventTypes.Contains(eventType))
-            .ToListAsync(ct);
+        return [.. await _repository.GetMatchingWebhookSubscriptionsAsync(eventType, ct)];
     }
 }

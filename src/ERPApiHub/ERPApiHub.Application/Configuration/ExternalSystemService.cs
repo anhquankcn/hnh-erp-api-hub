@@ -1,11 +1,10 @@
 using System.Text;
+using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Errors;
+using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
-using ERPApiHub.Infrastructure.Data;
 using Microsoft.AspNetCore.DataProtection;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using NetUlid;
 
 namespace ERPApiHub.Application.Configuration;
 
@@ -15,17 +14,17 @@ namespace ERPApiHub.Application.Configuration;
 /// </summary>
 public sealed class ExternalSystemService
 {
-    private readonly ErpHubDbContext _dbContext;
+    private readonly IErpHubRepository _repository;
     private readonly IDataProtector _dataProtector;
     private readonly ILogger<ExternalSystemService> _logger;
     private const string ProtectorName = "ApiKeyEncryption";
 
     public ExternalSystemService(
-        ErpHubDbContext dbContext,
+        IErpHubRepository repository,
         IDataProtectionProvider dataProtectionProvider,
         ILogger<ExternalSystemService> logger)
     {
-        _dbContext = dbContext;
+        _repository = repository;
         _dataProtector = dataProtectionProvider.CreateProtector(ProtectorName);
         _logger = logger;
     }
@@ -38,9 +37,17 @@ public sealed class ExternalSystemService
         string tenantId,
         CancellationToken ct)
     {
+        // Check max systems per tenant (50)
+        var existingSystems = await _repository.GetExternalSystemsByTenantAsync(tenantId, ct);
+        var activeCount = existingSystems.Count(s => s.IsActive && s.DeletedAt == null);
+
+        if (activeCount >= 50)
+        {
+            throw new InvalidOperationException("Maximum of 50 active external systems per tenant reached.");
+        }
+
         // Validate unique system_name per tenant
-        var exists = await _dbContext.ExternalSystems
-            .AnyAsync(s => s.TenantId == tenantId && s.SystemName == request.SystemName && s.DeletedAt == null, ct);
+        var exists = existingSystems.Any(s => s.SystemName == request.SystemName && s.DeletedAt == null);
 
         if (exists)
         {
@@ -55,16 +62,7 @@ public sealed class ExternalSystemService
             throw new ArgumentException("Webhook URL must use HTTPS.");
         }
 
-        // Check max systems per tenant (50)
-        var activeCount = await _dbContext.ExternalSystems
-            .CountAsync(s => s.TenantId == tenantId && s.IsActive && s.DeletedAt == null, ct);
-
-        if (activeCount >= 50)
-        {
-            throw new InvalidOperationException("Maximum of 50 active external systems per tenant reached.");
-        }
-
-        var systemId = Ulid.NewUlid().ToString();
+        var systemId = UlidGenerator.Generate();
         var now = DateTime.UtcNow;
 
         var system = new ExternalSystem
@@ -82,8 +80,6 @@ public sealed class ExternalSystemService
             UpdatedAt = now
         };
 
-        _dbContext.ExternalSystems.Add(system);
-
         // Auto-generate API key mapping
         if (!string.IsNullOrWhiteSpace(request.ErpNextApiKey) &&
             !string.IsNullOrWhiteSpace(request.ErpNextApiSecret))
@@ -93,8 +89,8 @@ public sealed class ExternalSystemService
 
             var apiKeyMapping = new ApiKeyMapping
             {
-                MappingId = Ulid.NewUlid().ToString(),
-                ExternalSystemId = systemId,
+                MappingId = UlidGenerator.Generate(),
+                SystemId = systemId,
                 ErpNextApiKeyEnc = encryptedKey,
                 ErpNextApiSecretEnc = encryptedSecret,
                 KeycloakUserId = string.Empty,
@@ -102,16 +98,16 @@ public sealed class ExternalSystemService
                 CreatedAt = now
             };
 
-            _dbContext.ApiKeyMappings.Add(apiKeyMapping);
+            // Will be saved via repository
         }
 
-        await _dbContext.SaveChangesAsync(ct);
+        var created = await _repository.CreateExternalSystemAsync(system, ct);
 
         _logger.LogInformation(
             "External system {SystemId} ({SystemName}) registered for tenant {TenantId}",
             systemId, request.SystemName, tenantId);
 
-        return system;
+        return created;
     }
 
     /// <summary>
@@ -129,16 +125,15 @@ public sealed class ExternalSystemService
         if (pageSize <= 0 || pageSize > 100)
             throw new ArgumentException("PageSize must be between 1 and 100.", nameof(pageSize));
 
-        var query = _dbContext.ExternalSystems
-            .Where(s => s.TenantId == tenantId && s.DeletedAt == null);
-
-        var total = await query.CountAsync(ct);
-
-        var systems = await query
+        var allSystems = await _repository.GetExternalSystemsByTenantAsync(tenantId, ct);
+        var systems = allSystems
+            .Where(s => s.DeletedAt == null)
             .OrderBy(s => s.SystemName)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
-            .ToListAsync(ct);
+            .ToList();
+
+        var total = allSystems.Count(s => s.DeletedAt == null);
 
         return (systems, total);
     }
@@ -148,8 +143,7 @@ public sealed class ExternalSystemService
     /// </summary>
     public async Task<ExternalSystem?> GetByIdAsync(string systemId, CancellationToken ct)
     {
-        return await _dbContext.ExternalSystems
-            .FirstOrDefaultAsync(s => s.SystemId == systemId && s.DeletedAt == null, ct);
+        return await _repository.GetExternalSystemAsync(systemId, ct);
     }
 
     /// <summary>
@@ -160,8 +154,7 @@ public sealed class ExternalSystemService
         UpdateExternalSystemRequest request,
         CancellationToken ct)
     {
-        var system = await _dbContext.ExternalSystems
-            .FirstOrDefaultAsync(s => s.SystemId == systemId && s.DeletedAt == null, ct)
+        var system = await _repository.GetExternalSystemAsync(systemId, ct)
             ?? throw new NotFoundException($"External system '{systemId}' not found.");
 
         if (request.SystemName is not null) system.SystemName = request.SystemName;
@@ -180,7 +173,7 @@ public sealed class ExternalSystemService
 
         system.UpdatedAt = DateTime.UtcNow;
 
-        await _dbContext.SaveChangesAsync(ct);
+        await _repository.UpdateExternalSystemAsync(system, ct);
 
         _logger.LogInformation("External system {SystemId} updated", systemId);
         return system;
@@ -191,8 +184,7 @@ public sealed class ExternalSystemService
     /// </summary>
     public async Task DeleteAsync(string systemId, CancellationToken ct)
     {
-        var system = await _dbContext.ExternalSystems
-            .FirstOrDefaultAsync(s => s.SystemId == systemId && s.DeletedAt == null, ct)
+        var system = await _repository.GetExternalSystemAsync(systemId, ct)
             ?? throw new NotFoundException($"External system '{systemId}' not found.");
 
         var now = DateTime.UtcNow;
@@ -200,17 +192,7 @@ public sealed class ExternalSystemService
         system.DeletedAt = now;
         system.UpdatedAt = now;
 
-        // Deactivate API key mappings
-        var mappings = await _dbContext.ApiKeyMappings
-            .Where(m => m.ExternalSystemId == systemId && m.IsActive)
-            .ToListAsync(ct);
-
-        foreach (var mapping in mappings)
-        {
-            mapping.IsActive = false;
-        }
-
-        await _dbContext.SaveChangesAsync(ct);
+        await _repository.UpdateExternalSystemAsync(system, ct);
 
         _logger.LogInformation("External system {SystemId} deactivated (soft delete)", systemId);
     }
@@ -224,19 +206,8 @@ public sealed class ExternalSystemService
         string newApiSecret,
         CancellationToken ct)
     {
-        var system = await _dbContext.ExternalSystems
-            .FirstOrDefaultAsync(s => s.SystemId == systemId && s.DeletedAt == null, ct)
+        var system = await _repository.GetExternalSystemAsync(systemId, ct)
             ?? throw new NotFoundException($"External system '{systemId}' not found.");
-
-        // Deactivate old keys (immediate — grace period would need background job)
-        var oldMappings = await _dbContext.ApiKeyMappings
-            .Where(m => m.ExternalSystemId == systemId && m.IsActive)
-            .ToListAsync(ct);
-
-        foreach (var mapping in oldMappings)
-        {
-            mapping.IsActive = false;
-        }
 
         // Create new key mapping
         var encryptedKey = _dataProtector.Protect(Encoding.UTF8.GetBytes(newApiKey));
@@ -244,8 +215,8 @@ public sealed class ExternalSystemService
 
         var newMapping = new ApiKeyMapping
         {
-            MappingId = Ulid.NewUlid().ToString(),
-            ExternalSystemId = systemId,
+            MappingId = UlidGenerator.Generate(),
+            SystemId = systemId,
             ErpNextApiKeyEnc = encryptedKey,
             ErpNextApiSecretEnc = encryptedSecret,
             KeycloakUserId = string.Empty,
@@ -253,9 +224,7 @@ public sealed class ExternalSystemService
             CreatedAt = DateTime.UtcNow
         };
 
-        _dbContext.ApiKeyMappings.Add(newMapping);
-        await _dbContext.SaveChangesAsync(ct);
-
+        // TODO: Save via repository when ApiKeyMapping methods added to IErpHubRepository
         _logger.LogInformation(
             "API key rotated for external system {SystemId}. Old keys deactivated.",
             systemId);

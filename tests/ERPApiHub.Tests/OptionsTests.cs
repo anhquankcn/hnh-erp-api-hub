@@ -1,4 +1,5 @@
 using ERPApiHub.Infrastructure.Caching;
+using ERPApiHub.Infrastructure.Messaging;
 using Xunit;
 
 namespace ERPApiHub.Tests;

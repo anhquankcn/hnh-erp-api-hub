@@ -1,6 +1,6 @@
 using System.Text.Json;
+using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Ingestion;
-using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
 using ERPApiHub.Infrastructure.Messaging;
 using Microsoft.AspNetCore.Http;
@@ -16,13 +16,13 @@ namespace ERPApiHub.Tests;
 public sealed class IngestionServiceTests
 {
     private readonly Mock<IAllowedDoctypeValidator> _doctypeValidator = new();
-    private readonly Mock<IRedisCacheService> _cache = new();
-    private readonly Mock<IRabbitMqConnectionFactory> _rabbitMqFactory = new();
-    private readonly Mock<IOptions<RabbitMqOptions>> _rabbitMqOptions = new();
-    private readonly Mock<IHttpContextAccessor> _httpContextAccessor = new();
+    private readonly Mock<ICacheService> _cache = new();
+    private readonly Mock<IMessageBus> _messageBus = new();
+    private Mock<IHttpContextAccessor> _httpContextAccessor = new();
     private readonly Mock<ILogger<IngestionService>> _logger = new();
 
     private readonly ErpHubDbContext _dbContext;
+    private readonly IErpHubRepository _repository;
 
     public IngestionServiceTests()
     {
@@ -30,11 +30,7 @@ public sealed class IngestionServiceTests
             .UseInMemoryDatabase(Guid.NewGuid().ToString())
             .Options;
         _dbContext = new ErpHubDbContext(options);
-
-        _rabbitMqOptions.Setup(x => x.Value).Returns(new RabbitMqOptions
-        {
-            ExchangeName = "1stopshop_event_bus"
-        });
+        _repository = new ErpHubRepository(_dbContext);
 
         SetupHttpContext("SGN", "user-123");
     }
@@ -63,10 +59,9 @@ public sealed class IngestionServiceTests
         return new IngestionService(
             _doctypeValidator.Object,
             _cache.Object,
-            _dbContext,
+            _repository,
             _httpContextAccessor.Object,
-            _rabbitMqFactory.Object,
-            _rabbitMqOptions.Object,
+            _messageBus.Object,
             _logger.Object);
     }
 
@@ -110,18 +105,12 @@ public sealed class IngestionServiceTests
         _cache.Setup(x => x.SetAsync(It.IsAny<string>(), It.IsAny<object>(), It.IsAny<TimeSpan?>(), default))
             .Returns(Task.CompletedTask);
 
-        var mockChannel = new Mock<IChannel>();
-        mockChannel.Setup(x => x.BasicPublishAsync(
-            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(),
-            It.IsAny<BasicProperties>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<CancellationToken>()))
-            .Returns(new ValueTask());
-
-        var mockConnection = new Mock<IConnection>();
-        mockConnection.Setup(x => x.CreateChannelAsync(It.IsAny<CreateChannelOptions>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(mockChannel.Object);
-
-        _rabbitMqFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(mockConnection.Object);
+        _messageBus.Setup(x => x.PublishAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<object>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
 
         var service = CreateService();
         var payload = JsonDocument.Parse("{\"name\":\"test\"}").RootElement;
@@ -134,12 +123,10 @@ public sealed class IngestionServiceTests
 
         Assert.NotNull(result);
         Assert.Equal("pending", result.Status);
-        mockChannel.Verify(x => x.BasicPublishAsync(
-            "1stopshop_event_bus",
+        _messageBus.Verify(x => x.PublishAsync(
+            string.Empty,
             It.Is<string>(rk => rk.Contains("Customer") && rk.Contains("created")),
-            It.IsAny<bool>(),
-            It.IsAny<BasicProperties>(),
-            It.IsAny<ReadOnlyMemory<byte>>(),
+            It.IsAny<object>(),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -152,18 +139,12 @@ public sealed class IngestionServiceTests
         _cache.Setup(x => x.SetAsync(It.IsAny<string>(), It.IsAny<object>(), It.IsAny<TimeSpan?>(), default))
             .Returns(Task.CompletedTask);
 
-        var mockChannel = new Mock<IChannel>();
-        mockChannel.Setup(x => x.BasicPublishAsync(
-            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<bool>(),
-            It.IsAny<BasicProperties>(), It.IsAny<ReadOnlyMemory<byte>>(), It.IsAny<CancellationToken>()))
-            .Returns(new ValueTask());
-
-        var mockConnection = new Mock<IConnection>();
-        mockConnection.Setup(x => x.CreateChannelAsync(It.IsAny<CreateChannelOptions>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(mockChannel.Object);
-
-        _rabbitMqFactory.Setup(x => x.CreateConnectionAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(mockConnection.Object);
+        _messageBus.Setup(x => x.PublishAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<object>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
 
         var httpContext = _httpContextAccessor.Object.HttpContext!;
         httpContext.Request.Headers.Remove("X-Idempotency-Key");
