@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "8d6TEEcMvr0=",
+  "dgSpecHash": "P3O3cBqIrHY=",
   "success": true,
-  "projectFilePath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj",
+  "projectFilePath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj",
   "expectedPackageFiles": [
     "/Users/quanna/.nuget/packages/aspnetcore.healthchecks.redis/9.0.0/aspnetcore.healthchecks.redis.9.0.0.nupkg.sha512",
     "/Users/quanna/.nuget/packages/humanizer.core/2.14.1/humanizer.core.2.14.1.nupkg.sha512",

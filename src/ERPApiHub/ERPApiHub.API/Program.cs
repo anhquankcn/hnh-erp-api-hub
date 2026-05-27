@@ -86,6 +86,7 @@ if (builder.Configuration.GetSection(JobOptions.SectionName).Get<JobOptions>()?.
 // Application layer services
 builder.Services.AddSingleton<AllowedDoctypeValidator>();
 builder.Services.AddScoped<IngestionService>();
+builder.Services.AddScoped<InvoiceDeletionGuard>();
 builder.Services.AddScoped<QueryService>();
 builder.Services.AddScoped<AuditService>();
 builder.Services.AddSingleton<PiiMaskingService>();

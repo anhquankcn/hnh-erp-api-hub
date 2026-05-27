@@ -3060,11 +3060,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj",
+      "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj",
       "projectName": "ERPApiHub.Worker",
-      "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj",
+      "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj",
       "packagesPath": "/Users/quanna/.nuget/packages/",
-      "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Worker/obj/",
+      "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Worker/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "/Users/quanna/.nuget/NuGet/NuGet.Config"
@@ -3079,8 +3079,8 @@
         "net9.0": {
           "targetAlias": "net9.0",
           "projectReferences": {
-            "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj": {
-              "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj"
+            "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj": {
+              "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj"
             }
           }
         }

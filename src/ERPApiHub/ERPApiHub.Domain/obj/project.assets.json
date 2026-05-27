@@ -46,11 +46,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj",
+      "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj",
       "projectName": "ERPApiHub.Domain",
-      "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj",
+      "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj",
       "packagesPath": "/Users/quanna/.nuget/packages/",
-      "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/obj/",
+      "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/obj/",
       "projectStyle": "PackageReference",
       "configFilePaths": [
         "/Users/quanna/.nuget/NuGet/NuGet.Config"

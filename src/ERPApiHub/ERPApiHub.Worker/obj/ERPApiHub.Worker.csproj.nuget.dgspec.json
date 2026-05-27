@@ -1,17 +1,17 @@
 {
   "format": 1,
   "restore": {
-    "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj": {}
+    "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj": {}
   },
   "projects": {
-    "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj": {
+    "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
+        "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
         "projectName": "ERPApiHub.Application",
-        "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
+        "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj",
         "packagesPath": "/Users/quanna/.nuget/packages/",
-        "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/obj/",
+        "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Application/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "/Users/quanna/.nuget/NuGet/NuGet.Config"
@@ -26,8 +26,8 @@
           "net9.0": {
             "targetAlias": "net9.0",
             "projectReferences": {
-              "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj": {
-                "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj"
+              "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj": {
+                "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj"
               }
             }
           }
@@ -105,14 +105,14 @@
         }
       }
     },
-    "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj": {
+    "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj",
+        "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj",
         "projectName": "ERPApiHub.Domain",
-        "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj",
+        "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj",
         "packagesPath": "/Users/quanna/.nuget/packages/",
-        "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/obj/",
+        "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "/Users/quanna/.nuget/NuGet/NuGet.Config"
@@ -170,14 +170,14 @@
         }
       }
     },
-    "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj": {
+    "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj",
+        "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj",
         "projectName": "ERPApiHub.Infrastructure",
-        "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj",
+        "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj",
         "packagesPath": "/Users/quanna/.nuget/packages/",
-        "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/obj/",
+        "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "/Users/quanna/.nuget/NuGet/NuGet.Config"
@@ -192,11 +192,11 @@
           "net9.0": {
             "targetAlias": "net9.0",
             "projectReferences": {
-              "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj": {
-                "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj"
+              "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj": {
+                "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj"
               },
-              "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj": {
-                "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj"
+              "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj": {
+                "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj"
               }
             }
           }
@@ -299,14 +299,14 @@
         }
       }
     },
-    "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj": {
+    "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj",
+        "projectUniqueName": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj",
         "projectName": "ERPApiHub.Worker",
-        "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj",
+        "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj",
         "packagesPath": "/Users/quanna/.nuget/packages/",
-        "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Worker/obj/",
+        "outputPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Worker/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
           "/Users/quanna/.nuget/NuGet/NuGet.Config"
@@ -321,8 +321,8 @@
           "net9.0": {
             "targetAlias": "net9.0",
             "projectReferences": {
-              "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj": {
-                "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-4-ops/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj"
+              "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj": {
+                "projectPath": "/Users/quanna/erp-api-hub/worktrees/sprint-5-a/src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj"
               }
             }
           }

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Application.Exceptions;
 using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
 using Microsoft.AspNetCore.Http;
@@ -53,9 +54,14 @@ public sealed class IngestionService : IIngestionService
     private readonly IErpHubRepository _repository;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly IMessageBus _messageBus;
+    private readonly InvoiceDeletionGuard _invoiceDeletionGuard;
+    private readonly IErpNextClient _erpNextClient;
     private readonly ILogger<IngestionService> _logger;
     private static readonly TimeSpan IdempotencyTtl = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan JobTtl = TimeSpan.FromHours(24);
+    private const string SalesInvoiceDoctype = "Sales Invoice";
+    private const string IssuedStatus = "Issued";
+    private const string CancelledStatus = "Cancelled";
 
     public IngestionService(
         IAllowedDoctypeValidator doctypeValidator,
@@ -63,6 +69,8 @@ public sealed class IngestionService : IIngestionService
         IErpHubRepository repository,
         IHttpContextAccessor httpContextAccessor,
         IMessageBus messageBus,
+        InvoiceDeletionGuard invoiceDeletionGuard,
+        IErpNextClient erpNextClient,
         ILogger<IngestionService> logger)
     {
         _doctypeValidator = doctypeValidator;
@@ -70,6 +78,8 @@ public sealed class IngestionService : IIngestionService
         _repository = repository;
         _httpContextAccessor = httpContextAccessor;
         _messageBus = messageBus;
+        _invoiceDeletionGuard = invoiceDeletionGuard;
+        _erpNextClient = erpNextClient;
         _logger = logger;
     }
 
@@ -100,6 +110,11 @@ public sealed class IngestionService : IIngestionService
         if (!_doctypeValidator.IsAllowed(doctype))
         {
             throw new ArgumentException($"Doctype '{doctype}' is not in the allowed list.");
+        }
+
+        if (!string.IsNullOrEmpty(name))
+        {
+            await ValidateInvoiceStatusChangeAsync(tenantId, doctype, name, payload, cancellationToken);
         }
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -157,6 +172,8 @@ public sealed class IngestionService : IIngestionService
             throw new ArgumentException($"Doctype '{doctype}' is not in the allowed list.");
         }
 
+        await ValidateInvoiceStatusChangeAsync(tenantId, doctype, name, payload, cancellationToken);
+
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
@@ -198,6 +215,40 @@ public sealed class IngestionService : IIngestionService
         if (!_doctypeValidator.IsAllowed(doctype))
         {
             throw new ArgumentException($"Doctype '{doctype}' is not in the allowed list.");
+        }
+
+        if (string.Equals(doctype, SalesInvoiceDoctype, StringComparison.Ordinal))
+        {
+            var result = await _invoiceDeletionGuard.CanDeleteAsync(
+                doctype,
+                name,
+                GetForceDelete(),
+                GetUserRole(),
+                cancellationToken);
+
+            if (!result.CanDelete)
+            {
+                await AuditAsync(
+                    tenantId,
+                    "INVOICE_DELETE_BLOCKED",
+                    $"/api/v1/ingest/{doctype}/{name}",
+                    StatusCodes.Status409Conflict,
+                    0,
+                    cancellationToken);
+
+                throw new InvoiceDeletionBlockedException(result.Reason ?? "Invoice deletion blocked");
+            }
+
+            if (result.RequiresAudit)
+            {
+                await AuditAsync(
+                    tenantId,
+                    "INVOICE_SOFT_DELETE",
+                    $"/api/v1/ingest/{doctype}/{name}",
+                    StatusCodes.Status202Accepted,
+                    0,
+                    cancellationToken);
+            }
         }
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -338,6 +389,112 @@ public sealed class IngestionService : IIngestionService
         };
 
         await _repository.CreateAuditLogAsync(auditLog, cancellationToken);
+    }
+
+    private async Task ValidateInvoiceStatusChangeAsync(
+        string tenantId,
+        string doctype,
+        string name,
+        JsonElement payload,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(doctype, SalesInvoiceDoctype, StringComparison.Ordinal)
+            || !TryGetStringProperty(payload, "status", out var newStatus)
+            || !string.Equals(newStatus, CancelledStatus, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var existingInvoice = await _erpNextClient.GetAsync<JsonElement>(
+            $"{SalesInvoiceDoctype}/{Uri.EscapeDataString(name)}",
+            cancellationToken);
+        var currentStatus = ExtractStatus(existingInvoice.Data);
+
+        if (!string.Equals(currentStatus, IssuedStatus, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!TryGetStringProperty(payload, "reason", out var reason)
+            || string.IsNullOrWhiteSpace(reason))
+        {
+            await AuditAsync(
+                tenantId,
+                "INVOICE_STATUS_CHANGE_BLOCKED",
+                $"/api/v1/ingest/{doctype}/{name}",
+                StatusCodes.Status409Conflict,
+                0,
+                cancellationToken);
+
+            throw new InvoiceStatusChangeBlockedException(
+                "Reason is required when cancelling an issued invoice");
+        }
+
+        await AuditAsync(
+            tenantId,
+            "INVOICE_STATUS_CHANGE",
+            $"/api/v1/ingest/{doctype}/{name}",
+            StatusCodes.Status202Accepted,
+            0,
+            cancellationToken);
+    }
+
+    private static bool TryGetStringProperty(JsonElement payload, string propertyName, out string? value)
+    {
+        value = null;
+        if (payload.ValueKind != JsonValueKind.Object
+            || !payload.TryGetProperty(propertyName, out var property)
+            || property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        value = property.GetString();
+        return true;
+    }
+
+    private static string? ExtractStatus(JsonElement invoice)
+    {
+        if (invoice.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (invoice.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.String)
+        {
+            return status.GetString();
+        }
+
+        if (invoice.TryGetProperty("data", out var data)
+            && data.ValueKind == JsonValueKind.Object
+            && data.TryGetProperty("status", out var nestedStatus)
+            && nestedStatus.ValueKind == JsonValueKind.String)
+        {
+            return nestedStatus.GetString();
+        }
+
+        return null;
+    }
+
+    private bool GetForceDelete()
+    {
+        var forceValue = _httpContextAccessor.HttpContext?.Request.Query["force"].FirstOrDefault();
+        return bool.TryParse(forceValue, out var force) && force;
+    }
+
+    private string GetUserRole()
+    {
+        var user = _httpContextAccessor.HttpContext?.User;
+        if (user?.IsInRole("admin") == true)
+        {
+            return "admin";
+        }
+
+        return user?.FindFirst(ClaimTypes.Role)?.Value
+            ?? user?.FindFirst("role")?.Value
+            ?? user?.FindFirst("roles")?.Value
+            ?? string.Empty;
     }
 
     private string GetTenantId()

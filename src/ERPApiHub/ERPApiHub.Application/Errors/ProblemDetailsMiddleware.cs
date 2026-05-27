@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using ERPApiHub.Application.Exceptions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
@@ -53,6 +54,20 @@ public sealed class ProblemDetailsMiddleware
 
         return exception switch
         {
+            InvoiceDeletionBlockedException invoiceDeletionBlocked => (
+                ProblemDetailsHelper.InvoiceBlocked(
+                    invoiceDeletionBlocked.Reason,
+                    path,
+                    requestId),
+                StatusCodes.Status409Conflict),
+
+            InvoiceStatusChangeBlockedException invoiceStatusChangeBlocked => (
+                ProblemDetailsHelper.InvoiceBlocked(
+                    invoiceStatusChangeBlocked.Reason,
+                    path,
+                    requestId),
+                StatusCodes.Status409Conflict),
+
             UnauthorizedAccessException => (
                 ProblemDetailsHelper.Unauthorized(
                     "Authentication failed or access denied.",

@@ -15,6 +15,8 @@ public interface IErpHubRepository
     // Tenant Registry
     Task<TenantRegistry?> GetTenantRegistryAsync(string tenantId, CancellationToken cancellationToken = default);
     Task<TenantRegistry?> GetTenantRegistryByBranchIdAsync(string branchId, CancellationToken cancellationToken = default);
+    Task<TenantRegistry> CreateTenantRegistryAsync(TenantRegistry tenant, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<TenantRegistry>> ListTenantRegistriesAsync(CancellationToken cancellationToken = default);
     Task UpdateTenantHealthAsync(string tenantId, string healthStatus, CancellationToken cancellationToken = default);
 
     // API Key Mappings
