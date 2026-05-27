@@ -53,7 +53,13 @@ public sealed class DlqManagementService
     {
         var key = "erphub:dlq:messages";
         var messages = await _cache.GetAsync<List<DlqMessage>>(key, cancellationToken) ?? [];
-        messages.RemoveAll(m => m.Id == messageId);
+        var removed = messages.RemoveAll(m => m.Id == messageId);
+        if (removed == 0)
+        {
+            _logger.LogWarning("DLQ message {MessageId} not found for purge", messageId);
+            return;
+        }
+
         await _cache.SetAsync(key, messages, TimeSpan.FromDays(7), cancellationToken);
         _logger.LogInformation("Purged DLQ message {MessageId}", messageId);
     }
