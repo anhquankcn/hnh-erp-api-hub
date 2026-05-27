@@ -12,6 +12,14 @@ public sealed class KongConfigService
         _logger = logger;
     }
 
+    public Task<(bool IsValid, List<string> Errors)> ValidateAsync(string yamlContent, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var result = ValidateConfig(yamlContent);
+        return Task.FromResult((result.IsValid, result.Errors.ToList()));
+    }
+
     public KongValidationResult ValidateConfig(string configYaml)
     {
         var errors = new List<string>();
@@ -46,7 +54,7 @@ public sealed class KongConfigService
             if (!hasJwt) errors.Add("Missing JWT plugin");
             if (!hasRateLimit) errors.Add("Missing rate-limiting plugin");
             if (!hasAcl) errors.Add("Missing ACL plugin");
-            if (!hasConsumer) warnings.Add("Missing consumer: erphub-client");
+            if (!hasConsumer) errors.Add("Missing consumer: erphub-client");
 
             // Section warnings
             if (!hasPlugins) warnings.Add("No plugins: section found");
@@ -57,7 +65,7 @@ public sealed class KongConfigService
             var redisPortMatch = Regex.Match(yaml, @"redis_port:\s*(\d+)", RegexOptions.Multiline);
             if (hasRateLimit && (!redisHostMatch.Success || !redisPortMatch.Success))
             {
-                warnings.Add("Rate-limiting plugin may be missing Redis configuration");
+                errors.Add("Rate-limiting plugin is missing Redis configuration");
             }
 
             if (errors.Count == 0)
