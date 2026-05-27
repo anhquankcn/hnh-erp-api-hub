@@ -116,21 +116,26 @@ app.MapPost("/api/v1/auth/refresh", async (RefreshTokenRequest req, ERPApiHub.Ap
     return result is null ? Results.Unauthorized() : Results.Ok(result);
 }).AllowAnonymous();
 
-app.MapPost("/api/v1/auth/revoke", async (RevokeTokenRequest req, ERPApiHub.Application.Auth.TokenService service, CancellationToken ct) =>
+app.MapPost("/api/v1/auth/revoke", async (HttpContext ctx, RevokeTokenRequest req, ERPApiHub.Application.Auth.TokenService service, CancellationToken ct) =>
 {
-    var verify = service.VerifyToken(req.Token);
-    if (verify.IsValid && verify.Jti is not null)
-    {
-        var remaining = verify.Expiry.HasValue ? verify.Expiry.Value - DateTime.UtcNow : TimeSpan.FromHours(1);
-        await service.RevokeTokenAsync(verify.Jti, remaining, ct);
-    }
-    return Results.Ok(new { message = "Token revoked" });
-}).AllowAnonymous();
+    // Require authentication — only allow revoking the currently validated token
+    if (!ctx.User.Identity?.IsAuthenticated ?? true)
+        return Results.Unauthorized();
 
-app.MapGet("/api/v1/auth/verify", (string token, ERPApiHub.Application.Auth.TokenService service) =>
+    var jti = ctx.User.FindFirst("jti")?.Value;
+    if (string.IsNullOrEmpty(jti))
+    {
+        return Results.BadRequest(new { error = "Token missing jti claim" });
+    }
+
+    await service.RevokeTokenAsync(jti, TimeSpan.FromHours(1), ct);
+    return Results.Ok(new { message = "Token revoked" });
+}).RequireAuthorization();
+
+app.MapPost("/api/v1/auth/verify", (VerifyTokenRequest req, ERPApiHub.Application.Auth.TokenService service) =>
 {
-    var verify = service.VerifyToken(token);
-    return verify.IsValid ? Results.Ok(verify) : Results.Unauthorized();
+    var verify = service.ValidateAndDecodeToken(req.Token);
+    return verify is not null ? Results.Ok(verify) : Results.Unauthorized();
 }).AllowAnonymous();
 
 // Root & health
@@ -446,6 +451,11 @@ public sealed record RefreshTokenRequest
 }
 
 public sealed record RevokeTokenRequest
+{
+    public string Token { get; init; } = string.Empty;
+}
+
+public sealed record VerifyTokenRequest
 {
     public string Token { get; init; } = string.Empty;
 }

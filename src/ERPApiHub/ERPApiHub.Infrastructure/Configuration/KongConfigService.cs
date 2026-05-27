@@ -19,17 +19,26 @@ public sealed class KongConfigService
 
         try
         {
-            // Simple YAML validation without external packages
-            var lines = configYaml.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            var yaml = string.Join("\n", lines.Select(l => l.TrimEnd()));
+            // Parse YAML line-by-line, filter comments and empty lines
+            var lines = configYaml.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(l => l.TrimEnd())
+                .Where(l => !string.IsNullOrWhiteSpace(l) && !l.TrimStart().StartsWith("#"))
+                .ToList();
 
-            var hasServices = yaml.Contains("services:", StringComparison.Ordinal);
-            var hasErpApiHub = yaml.Contains("name: erp-api-hub", StringComparison.Ordinal);
-            var hasErpNext = yaml.Contains("name: erpnext", StringComparison.Ordinal);
-            var hasJwt = yaml.Contains("name: jwt", StringComparison.Ordinal);
-            var hasRateLimit = yaml.Contains("name: rate-limiting", StringComparison.Ordinal);
-            var hasAcl = yaml.Contains("name: acl", StringComparison.Ordinal);
-            var hasConsumer = yaml.Contains("username: erphub-client", StringComparison.Ordinal);
+            var yaml = string.Join("\n", lines);
+
+            // Structural checks — look for top-level keys (not inside comments)
+            var hasServices = Regex.IsMatch(yaml, @"^services:\s*$", RegexOptions.Multiline);
+            var hasPlugins = Regex.IsMatch(yaml, @"^plugins:\s*$", RegexOptions.Multiline);
+            var hasConsumers = Regex.IsMatch(yaml, @"^consumers:\s*$", RegexOptions.Multiline);
+
+            // Entity checks with context awareness (match specific YAML key-value patterns)
+            var hasErpApiHub = lines.Any(l => Regex.IsMatch(l, @"^\s+-?\s*name:\s+erp-api-hub\s*$"));
+            var hasErpNext = lines.Any(l => Regex.IsMatch(l, @"^\s+-?\s*name:\s+erpnext\s*$"));
+            var hasJwt = lines.Any(l => Regex.IsMatch(l, @"^\s+-?\s*name:\s+jwt\s*$"));
+            var hasRateLimit = lines.Any(l => Regex.IsMatch(l, @"^\s+-?\s*name:\s+rate-limiting\s*$"));
+            var hasAcl = lines.Any(l => Regex.IsMatch(l, @"^\s+-?\s*name:\s+acl\s*$"));
+            var hasConsumer = lines.Any(l => Regex.IsMatch(l, @"^\s+-?\s*username:\s+erphub-client\s*$"));
 
             if (!hasServices) errors.Add("No services defined");
             if (!hasErpApiHub) errors.Add("Missing service: erp-api-hub");
@@ -38,6 +47,18 @@ public sealed class KongConfigService
             if (!hasRateLimit) errors.Add("Missing rate-limiting plugin");
             if (!hasAcl) errors.Add("Missing ACL plugin");
             if (!hasConsumer) warnings.Add("Missing consumer: erphub-client");
+
+            // Section warnings
+            if (!hasPlugins) warnings.Add("No plugins: section found");
+            if (!hasConsumers) warnings.Add("No consumers: section found");
+
+            // Validate Redis config for rate-limiting
+            var redisHostMatch = Regex.Match(yaml, @"redis_host:\s*(\S+)", RegexOptions.Multiline);
+            var redisPortMatch = Regex.Match(yaml, @"redis_port:\s*(\d+)", RegexOptions.Multiline);
+            if (hasRateLimit && (!redisHostMatch.Success || !redisPortMatch.Success))
+            {
+                warnings.Add("Rate-limiting plugin may be missing Redis configuration");
+            }
 
             if (errors.Count == 0)
             {

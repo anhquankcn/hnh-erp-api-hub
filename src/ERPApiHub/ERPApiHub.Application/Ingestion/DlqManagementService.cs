@@ -17,6 +17,11 @@ public sealed class DlqManagementService
         _logger = logger;
     }
 
+    /// <summary>
+    /// Retrieves dead-letter messages with in-memory pagination.
+    /// TODO: Implement server-side pagination (e.g. Redis Streams, sorted set, or database)
+    /// to avoid loading entire DLQ into memory when scale grows.
+    /// </summary>
     public async Task<(IReadOnlyList<DlqMessage> Items, int Total)> GetDeadLettersAsync(int page, int pageSize, CancellationToken cancellationToken = default)
     {
         var key = "erphub:dlq:messages";
