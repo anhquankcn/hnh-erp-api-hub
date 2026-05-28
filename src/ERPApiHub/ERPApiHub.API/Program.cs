@@ -106,6 +106,9 @@ builder.Services.AddScoped<WebhookSubscriptionService>();
 builder.Services.AddScoped<WebhookDeliveryService>();
 builder.Services.AddHttpClient("WebhookDelivery");
 
+// S6-002: PDPA REST endpoints
+builder.Services.AddScoped<ConsentService>();
+
 // S4-002: Token Lifecycle
 builder.Services.AddScoped<ERPApiHub.Application.Auth.TokenService>();
 builder.Services.AddHttpClient("KeycloakToken");
