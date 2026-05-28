@@ -44,12 +44,18 @@ public sealed class ErpNextHttpClient : IErpNextClient
 
     public async Task<ErpNextResponse<T>> GetAsync<T>(string resourcePath, CancellationToken cancellationToken)
     {
+        return await GetAsync<T>(resourcePath, GetTenantId(), cancellationToken);
+    }
+
+    public async Task<ErpNextResponse<T>> GetAsync<T>(string resourcePath, string tenantId, CancellationToken cancellationToken)
+    {
         return await ExecuteWithTenantAsync<T>(
             async (client, ct) =>
             {
                 var response = await client.GetAsync($"/api/resource/{resourcePath}", ct);
                 return await HandleResponseAsync<T>(response, ct);
             },
+            tenantId,
             cancellationToken);
     }
 
@@ -65,6 +71,7 @@ public sealed class ErpNextHttpClient : IErpNextClient
                 var response = await client.PostAsync($"/api/resource/{resourcePath}", content, ct);
                 return await HandleResponseAsync<T>(response, ct);
             },
+            GetTenantId(),
             cancellationToken);
     }
 
@@ -80,6 +87,7 @@ public sealed class ErpNextHttpClient : IErpNextClient
                 var response = await client.PutAsync($"/api/resource/{resourcePath}", content, ct);
                 return await HandleResponseAsync<T>(response, ct);
             },
+            GetTenantId(),
             cancellationToken);
     }
 
@@ -91,6 +99,7 @@ public sealed class ErpNextHttpClient : IErpNextClient
                 var response = await client.DeleteAsync($"/api/resource/{resourcePath}", ct);
                 return await HandleResponseAsync<T>(response, ct);
             },
+            GetTenantId(),
             cancellationToken);
     }
 
@@ -114,16 +123,15 @@ public sealed class ErpNextHttpClient : IErpNextClient
 
                 return new ErpNextResponse<JsonElement[]>(null, result.StatusCode, result.Message);
             },
+            GetTenantId(),
             cancellationToken);
     }
 
     private async Task<ErpNextResponse<T>> ExecuteWithTenantAsync<T>(
         Func<HttpClient, CancellationToken, Task<ErpNextResponse<T>>> action,
+        string branchId,
         CancellationToken cancellationToken)
     {
-        var branchId = _httpContextAccessor.HttpContext?.User.FindFirst("BranchId")?.Value
-            ?? throw new UnauthorizedAccessException("BranchId claim not found in JWT.");
-
         await using var scope = _scopeFactory.CreateAsyncScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<ErpHubDbContext>();
         var tenant = await dbContext.TenantRegistries
@@ -167,6 +175,10 @@ public sealed class ErpNextHttpClient : IErpNextClient
 
         return await retryPolicy.ExecuteAsync(() => action(scopedClient, cancellationToken));
     }
+
+    private string GetTenantId() =>
+        _httpContextAccessor.HttpContext?.User.FindFirst("BranchId")?.Value
+            ?? throw new UnauthorizedAccessException("BranchId claim not found in JWT.");
 
     private static async Task<ErpNextResponse<T>> HandleResponseAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken)
     {

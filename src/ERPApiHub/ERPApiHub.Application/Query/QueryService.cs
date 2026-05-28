@@ -34,8 +34,12 @@ public sealed class QueryService
 
     public async Task<PaginatedResponse<JsonElement>> ListAsync(QueryRequest request, CancellationToken cancellationToken)
     {
+        return await ListAsync(request, GetTenantId(), cancellationToken);
+    }
+
+    public async Task<PaginatedResponse<JsonElement>> ListAsync(QueryRequest request, string tenantId, CancellationToken cancellationToken)
+    {
         var sw = Stopwatch.StartNew();
-        var tenantId = GetTenantId();
 
         // Check Cache-Control: no-cache
         var bypassCache = _httpContextAccessor.HttpContext?.Request.Headers.CacheControl.Contains("no-cache") == true;
@@ -56,7 +60,7 @@ public sealed class QueryService
         var limitStart = (request.Page - 1) * request.PageSize;
         var resourcePath = BuildResourcePath(request, limitStart);
 
-        var response = await _erpNextClient.GetAsync<JsonElement>(resourcePath, cancellationToken);
+        var response = await _erpNextClient.GetAsync<JsonElement>(resourcePath, tenantId, cancellationToken);
 
         if (response.StatusCode != 200 || response.Data.ValueKind == JsonValueKind.Undefined)
         {

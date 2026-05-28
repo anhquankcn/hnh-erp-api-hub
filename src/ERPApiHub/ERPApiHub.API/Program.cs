@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using ERPApiHub.API.Services.Jobs;
 using ERPApiHub.API.Health;
 using ERPApiHub.API.Services.Caching;
 using ERPApiHub.Application.Audit;
@@ -16,7 +17,11 @@ using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
 using ERPApiHub.Infrastructure.ErpNext;
 using ERPApiHub.Infrastructure.Security;
+using Hangfire;
+using Hangfire.Dashboard;
+using Hangfire.Redis.StackExchange;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using ApplicationCacheService = ERPApiHub.Application.Abstractions.ICacheService;
 
@@ -25,6 +30,17 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls("http://0.0.0.0:8008");
 builder.Services.AddOpenApi();
 builder.Services.AddControllers();
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(
+    [
+        "application/json",
+        "application/problem+json"
+    ]);
+});
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("InternalGateway", policy =>
@@ -43,6 +59,29 @@ builder.Services.Configure<CacheOptions>(builder.Configuration.GetSection(CacheO
 builder.Services.AddSingleton<CacheService>();
 builder.Services.AddSingleton<ApplicationCacheService>(sp => sp.GetRequiredService<CacheService>());
 builder.Services.AddScoped<CacheInvalidationService>();
+
+// S4-004: Hangfire background jobs
+builder.Services.Configure<JobOptions>(builder.Configuration.GetSection(JobOptions.SectionName));
+builder.Services.AddScoped<CacheWarmingJob>();
+builder.Services.AddScoped<CacheEvictionJob>();
+builder.Services.AddScoped<HealthCheckAggregationJob>();
+var jobOptionsForHangfire = builder.Configuration.GetSection(JobOptions.SectionName).Get<JobOptions>();
+builder.Services.AddHangfire(configuration =>
+{
+    configuration
+        .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+        .UseSimpleAssemblyNameTypeSerializer()
+        .UseRecommendedSerializerSettings()
+        .UseRedisStorage(BuildRedisConnectionString(builder.Configuration), new RedisStorageOptions
+        {
+            Prefix = jobOptionsForHangfire?.RedisPrefix ?? "erphub:hangfire:"
+        });
+});
+
+if (builder.Configuration.GetSection(JobOptions.SectionName).Get<JobOptions>()?.Enabled != false)
+{
+    builder.Services.AddHangfireServer();
+}
 
 // Application layer services
 builder.Services.AddSingleton<AllowedDoctypeValidator>();
@@ -106,6 +145,8 @@ if (app.Environment.IsDevelopment())
     app.UseCors("InternalGateway");
 }
 
+app.UseResponseCompression();
+
 // S3-005: Request logging
 app.UseMiddleware<RequestLoggingMiddleware>();
 
@@ -118,6 +159,20 @@ app.UseAuthentication();
 app.UseMiddleware<RateLimitMiddleware>();
 
 app.UseAuthorization();
+
+var jobOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<JobOptions>>().Value;
+if (jobOptions.Enabled)
+{
+    if (jobOptions.DashboardEnabled)
+    {
+        app.UseHangfireDashboard(jobOptions.DashboardPath, new DashboardOptions
+        {
+            Authorization = [new AdminRoleDashboardAuthorizationFilter()]
+        });
+    }
+
+    RegisterRecurringJobs(jobOptions);
+}
 
 app.MapControllers();
 
@@ -233,6 +288,14 @@ app.MapGet("/api/v1/query/{doctype}", async (string doctype, int? page, int? pag
 
     var response = await queryService.ListAsync(request, ct);
     return Results.Ok(response);
+}).RequireAuthorization("api-hub:read");
+
+app.MapGet("/api/v1/query/{doctype}/stream", (string doctype, int? pageSize, int? maxPages, string? filters, string? orderBy, string? fields, QueryService queryService, CancellationToken ct) =>
+{
+    var normalizedPageSize = Math.Clamp(pageSize ?? 100, 1, 500);
+    var normalizedMaxPages = Math.Clamp(maxPages ?? 100, 1, 1000);
+
+    return StreamQueryAsync(doctype, normalizedPageSize, normalizedMaxPages, filters, orderBy, fields, queryService, ct);
 }).RequireAuthorization("api-hub:read");
 
 app.MapGet("/api/v1/query/{doctype}/{name}", async (string doctype, string name, QueryService queryService, CancellationToken ct) =>
@@ -439,6 +502,93 @@ static Task WriteHealthCheckResponseAsync(HttpContext context, HealthReport repo
     };
 
     return JsonSerializer.SerializeAsync(context.Response.Body, payload);
+}
+
+static async IAsyncEnumerable<JsonElement> StreamQueryAsync(
+    string doctype,
+    int pageSize,
+    int maxPages,
+    string? filters,
+    string? orderBy,
+    string? fields,
+    QueryService queryService,
+    [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+{
+    for (var page = 1; page <= maxPages; page++)
+    {
+        var response = await queryService.ListAsync(new QueryRequest
+        {
+            Doctype = doctype,
+            Page = page,
+            PageSize = pageSize,
+            Filters = filters,
+            OrderBy = orderBy,
+            Fields = fields
+        }, cancellationToken);
+
+        if (response.Data.Count == 0)
+        {
+            yield break;
+        }
+
+        foreach (var item in response.Data)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            yield return item;
+        }
+
+        if (response.Data.Count < pageSize)
+        {
+            yield break;
+        }
+    }
+}
+
+static void RegisterRecurringJobs(JobOptions options)
+{
+    RecurringJob.AddOrUpdate<CacheWarmingJob>(
+        "s4-cache-warming",
+        job => job.WarmAsync(),
+        options.CacheWarmingCron);
+
+    RecurringJob.AddOrUpdate<CacheEvictionJob>(
+        "s4-cache-eviction",
+        job => job.CleanupExpiredEntriesAsync(),
+        options.CacheEvictionCron);
+
+    RecurringJob.AddOrUpdate<HealthCheckAggregationJob>(
+        "s4-health-check-aggregation",
+        job => job.AggregateAsync(),
+        options.HealthAggregationCron);
+}
+
+static string BuildRedisConnectionString(IConfiguration configuration)
+{
+    var redisConnectionString = configuration["Redis:ConnectionString"] ?? "localhost:6379";
+    var redisPassword = configuration["Redis:Password"];
+
+    if (!string.IsNullOrWhiteSpace(redisPassword)
+        && !redisConnectionString.Contains("password=", StringComparison.OrdinalIgnoreCase))
+    {
+        redisConnectionString = $"{redisConnectionString},password={redisPassword}";
+    }
+
+    if (!redisConnectionString.Contains("abortConnect=", StringComparison.OrdinalIgnoreCase))
+    {
+        redisConnectionString = $"{redisConnectionString},abortConnect=false";
+    }
+
+    return redisConnectionString;
+}
+
+sealed class AdminRoleDashboardAuthorizationFilter : IDashboardAuthorizationFilter
+{
+    public bool Authorize(DashboardContext context)
+    {
+        var user = context.GetHttpContext().User;
+        return user.Identity?.IsAuthenticated == true
+            && (user.IsInRole("erp-hub-admin") || user.IsInRole("SuperAdmin"));
+    }
 }
 
 // ─── Request DTOs ───

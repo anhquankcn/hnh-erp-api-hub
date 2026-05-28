@@ -78,6 +78,10 @@ public sealed class QueryServiceTests
 
         Assert.NotNull(result);
         _erpNextClient.Verify(x => x.GetAsync<JsonElement>(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _erpNextClient.Verify(x => x.GetAsync<JsonElement>(
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -89,7 +93,10 @@ public sealed class QueryServiceTests
             .Returns(Task.CompletedTask);
 
         var responseData = JsonDocument.Parse("{\"data\":[{\"name\":\"CUST-001\"}]}").RootElement;
-        _erpNextClient.Setup(x => x.GetAsync<JsonElement>(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        _erpNextClient.Setup(x => x.GetAsync<JsonElement>(
+                It.IsAny<string>(),
+                "SGN",
+                It.IsAny<CancellationToken>()))
             .ReturnsAsync(new ErpNextResponse<JsonElement>(responseData, 200, null));
 
         // Force no-cache to bypass cache lookup
@@ -103,7 +110,39 @@ public sealed class QueryServiceTests
         Assert.NotNull(result);
         Assert.Single(result.Data);
         _erpNextClient.Verify(x => x.GetAsync<JsonElement>(
-            It.Is<string>(p => p.StartsWith("Customer?")), It.IsAny<CancellationToken>()), Times.Once);
+            It.Is<string>(p => p.StartsWith("Customer?")),
+            "SGN",
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task ListAsync_WithExplicitTenant_UsesTenantForCacheAndErpNext()
+    {
+        _cache.Setup(x => x.GetAsync<PaginatedResponse<JsonElement>>(It.IsAny<string>(), default))
+            .ReturnsAsync((PaginatedResponse<JsonElement>?)null);
+        _cache.Setup(x => x.SetAsync(It.IsAny<string>(), It.IsAny<object>(), It.IsAny<TimeSpan?>(), default))
+            .Returns(Task.CompletedTask);
+
+        var responseData = JsonDocument.Parse("{\"data\":[{\"name\":\"CUST-001\"}]}").RootElement;
+        _erpNextClient.Setup(x => x.GetAsync<JsonElement>(
+                It.IsAny<string>(),
+                "HAN",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ErpNextResponse<JsonElement>(responseData, 200, null));
+
+        var service = CreateService();
+        var request = new QueryRequest { Doctype = "Customer", Page = 1, PageSize = 20 };
+
+        var result = await service.ListAsync(request, "HAN", CancellationToken.None);
+
+        Assert.Single(result.Data);
+        _cache.Verify(x => x.GetAsync<PaginatedResponse<JsonElement>>(
+            It.Is<string>(k => k.StartsWith("query:HAN:Customer")),
+            It.IsAny<CancellationToken>()), Times.Once);
+        _erpNextClient.Verify(x => x.GetAsync<JsonElement>(
+            It.Is<string>(p => p.StartsWith("Customer?")),
+            "HAN",
+            It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]

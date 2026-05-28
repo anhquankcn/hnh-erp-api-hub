@@ -12,6 +12,12 @@ public sealed class NoOpErpNextClient(ILogger<NoOpErpNextClient> logger) : IErpN
         return Task.FromResult(new ErpNextResponse<T>(default, 200, "No-op ERPNext GET accepted."));
     }
 
+    public Task<ErpNextResponse<T>> GetAsync<T>(string resourcePath, string tenantId, CancellationToken cancellationToken)
+    {
+        logger.LogInformation("ERPNext client placeholder accepted GET {ResourcePath} for tenant {TenantId}", resourcePath, tenantId);
+        return Task.FromResult(new ErpNextResponse<T>(default, 200, "No-op ERPNext GET accepted."));
+    }
+
     public Task<ErpNextResponse<T>> PostAsync<T>(string resourcePath, object payload, CancellationToken cancellationToken)
     {
         logger.LogInformation("ERPNext client placeholder accepted POST {ResourcePath}", resourcePath);

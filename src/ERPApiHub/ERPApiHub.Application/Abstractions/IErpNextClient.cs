@@ -6,6 +6,8 @@ public interface IErpNextClient
 {
     Task<ErpNextResponse<T>> GetAsync<T>(string resourcePath, CancellationToken cancellationToken);
 
+    Task<ErpNextResponse<T>> GetAsync<T>(string resourcePath, string tenantId, CancellationToken cancellationToken);
+
     Task<ErpNextResponse<T>> PostAsync<T>(string resourcePath, object payload, CancellationToken cancellationToken);
 
     Task<ErpNextResponse<T>> PutAsync<T>(string resourcePath, object payload, CancellationToken cancellationToken);
