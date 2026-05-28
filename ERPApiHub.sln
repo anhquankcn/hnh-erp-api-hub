@@ -16,6 +16,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ERPApiHub.Worker", "src\ERP
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ERPApiHub.Tests", "tests\ERPApiHub.Tests\ERPApiHub.Tests.csproj", "{FF272E53-CE33-41DF-8E46-612DA73355C6}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ERPApiHub.Benchmarks", "tests\ERPApiHub.Benchmarks\ERPApiHub.Benchmarks.csproj", "{6ABEA7FD-4D40-4C3F-9840-D777F8211A1E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -50,5 +52,9 @@ Global
 		{FF272E53-CE33-41DF-8E46-612DA73355C6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{FF272E53-CE33-41DF-8E46-612DA73355C6}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{FF272E53-CE33-41DF-8E46-612DA73355C6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6ABEA7FD-4D40-4C3F-9840-D777F8211A1E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6ABEA7FD-4D40-4C3F-9840-D777F8211A1E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6ABEA7FD-4D40-4C3F-9840-D777F8211A1E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6ABEA7FD-4D40-4C3F-9840-D777F8211A1E}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
