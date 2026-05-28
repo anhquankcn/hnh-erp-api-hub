@@ -93,33 +93,92 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
         DateTimeOffset? to = null,
         int page = 1,
         int pageSize = 50,
+        CancellationToken cancellationToken = default) =>
+        await GetAuditLogsAsync(
+            tenantId: tenantId,
+            eventType: action,
+            fromDate: from,
+            toDate: to,
+            page: page,
+            pageSize: pageSize,
+            cancellationToken: cancellationToken);
+
+    public async Task<(IReadOnlyList<AuditLog> Items, int Total)> GetAuditLogsAsync(
+        string? tenantId = null,
+        string? systemId = null,
+        string? eventType = null,
+        DateTimeOffset? fromDate = null,
+        DateTimeOffset? toDate = null,
+        string? status = null,
+        string? userId = null,
+        string? endpoint = null,
+        string? correlationId = null,
+        int page = 1,
+        int pageSize = 50,
+        string sortBy = "createdAt",
+        string sortDirection = "desc",
         CancellationToken cancellationToken = default)
     {
-        var query = dbContext.AuditLogs.AsQueryable();
+        var query = dbContext.AuditLogs.AsNoTracking().AsQueryable();
 
         if (!string.IsNullOrWhiteSpace(tenantId))
         {
             query = query.Where(x => x.TenantId == tenantId);
         }
 
-        if (!string.IsNullOrWhiteSpace(action))
+        if (!string.IsNullOrWhiteSpace(systemId))
         {
-            query = query.Where(x => x.Method == action);
+            query = query.Where(x => x.SystemId == systemId);
         }
 
-        if (from is not null)
+        if (!string.IsNullOrWhiteSpace(eventType))
         {
-            query = query.Where(x => x.CreatedAt >= from);
+            var normalizedEventType = eventType.Trim().ToUpperInvariant();
+            query = query.Where(x => x.Method == normalizedEventType);
         }
 
-        if (to is not null)
+        if (fromDate is not null)
         {
-            query = query.Where(x => x.CreatedAt <= to);
+            query = query.Where(x => x.CreatedAt >= fromDate);
         }
+
+        if (toDate is not null)
+        {
+            query = query.Where(x => x.CreatedAt <= toDate);
+        }
+
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            query = NormalizeAuditStatus(status) switch
+            {
+                "success" => query.Where(x => x.StatusCode >= 200 && x.StatusCode < 400),
+                "failure" => query.Where(x => x.StatusCode >= 500),
+                "warning" => query.Where(x => x.StatusCode == null || x.StatusCode < 200 || (x.StatusCode >= 400 && x.StatusCode < 500)),
+                _ => query
+            };
+        }
+
+        if (!string.IsNullOrWhiteSpace(userId))
+        {
+            query = query.Where(x => x.UserId == userId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(endpoint))
+        {
+            query = query.Where(x => x.Endpoint.Contains(endpoint));
+        }
+
+        if (!string.IsNullOrWhiteSpace(correlationId))
+        {
+            query = query.Where(x => x.RequestId == correlationId);
+        }
+
+        page = Math.Max(page, 1);
+        pageSize = Math.Clamp(pageSize, 1, 500);
 
         var total = await query.CountAsync(cancellationToken);
-        var items = await query
-            .OrderByDescending(x => x.CreatedAt)
+        var ordered = ApplyAuditLogOrdering(query, sortBy, sortDirection);
+        var items = await ordered
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToListAsync(cancellationToken);
@@ -256,4 +315,28 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
 
     public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) =>
         dbContext.SaveChangesAsync(cancellationToken);
+
+    private static IOrderedQueryable<AuditLog> ApplyAuditLogOrdering(
+        IQueryable<AuditLog> query,
+        string? sortBy,
+        string? sortDirection)
+    {
+        var descending = !string.Equals(sortDirection, "asc", StringComparison.OrdinalIgnoreCase);
+        var normalizedSortBy = sortBy?.Trim().ToLowerInvariant();
+
+        return normalizedSortBy switch
+        {
+            "tenantid" or "tenant_id" => descending ? query.OrderByDescending(x => x.TenantId) : query.OrderBy(x => x.TenantId),
+            "systemid" or "system_id" => descending ? query.OrderByDescending(x => x.SystemId) : query.OrderBy(x => x.SystemId),
+            "eventtype" or "event_type" or "method" => descending ? query.OrderByDescending(x => x.Method) : query.OrderBy(x => x.Method),
+            "statuscode" or "status_code" => descending ? query.OrderByDescending(x => x.StatusCode) : query.OrderBy(x => x.StatusCode),
+            "durationms" or "duration_ms" => descending ? query.OrderByDescending(x => x.DurationMs) : query.OrderBy(x => x.DurationMs),
+            "userid" or "user_id" => descending ? query.OrderByDescending(x => x.UserId) : query.OrderBy(x => x.UserId),
+            "endpoint" => descending ? query.OrderByDescending(x => x.Endpoint) : query.OrderBy(x => x.Endpoint),
+            _ => descending ? query.OrderByDescending(x => x.CreatedAt) : query.OrderBy(x => x.CreatedAt)
+        };
+    }
+
+    private static string NormalizeAuditStatus(string status) =>
+        status.Trim().ToLowerInvariant();
 }

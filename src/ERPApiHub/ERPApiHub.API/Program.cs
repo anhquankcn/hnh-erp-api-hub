@@ -100,6 +100,7 @@ builder.Services.AddScoped<IngestionService>();
 builder.Services.AddScoped<InvoiceDeletionGuard>();
 builder.Services.AddScoped<QueryService>();
 builder.Services.AddScoped<AuditService>();
+builder.Services.AddScoped<AuditSearchService>();
 builder.Services.AddSingleton<PiiMaskingService>();
 builder.Services.AddScoped<WebhookSignatureService>();
 builder.Services.AddScoped<WebhookSubscriptionService>();
