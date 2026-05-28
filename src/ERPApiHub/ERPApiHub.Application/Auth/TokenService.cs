@@ -275,28 +275,30 @@ public sealed class TokenService
         if (string.IsNullOrWhiteSpace(token))
             return ApiTokenValidationResult.Invalid("Token is required.");
 
-        var tokenHash = HashToken(token.Trim());
-        var id = await _cache.GetAsync<string>(TokenHashKey(tokenHash), cancellationToken);
-        if (string.IsNullOrWhiteSpace(id))
-            return ApiTokenValidationResult.Invalid("Token was not found.");
+        // Get all active tokens and verify against each (constant-time for security)
+        var ids = await _cache.GetAsync<List<string>>(TokenIndexKey, cancellationToken) ?? [];
+        foreach (var id in ids)
+        {
+            var record = await GetTokenAsync(id, cancellationToken);
+            if (record is null || !record.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase))
+                continue;
 
-        var record = await GetTokenAsync(id, cancellationToken);
-        if (record is null)
-            return ApiTokenValidationResult.Invalid("Token metadata was not found.");
+            if (BCrypt.Net.BCrypt.Verify(token.Trim(), record.TokenHash))
+            {
+                if (record.ExpiresAt <= DateTimeOffset.UtcNow)
+                    return ApiTokenValidationResult.Invalid("Token has expired.", record.Id, record.SystemId);
 
-        if (record.Status.Equals(ApiTokenStatuses.Revoked, StringComparison.OrdinalIgnoreCase))
-            return ApiTokenValidationResult.Invalid("Token has been revoked.", record.Id, record.SystemId);
+                return new ApiTokenValidationResult(
+                    true,
+                    record.Id,
+                    record.SystemId,
+                    record.Permissions,
+                    record.ExpiresAt,
+                    null);
+            }
+        }
 
-        if (record.ExpiresAt <= DateTimeOffset.UtcNow)
-            return ApiTokenValidationResult.Invalid("Token has expired.", record.Id, record.SystemId);
-
-        return new ApiTokenValidationResult(
-            true,
-            record.Id,
-            record.SystemId,
-            record.Permissions,
-            record.ExpiresAt,
-            null);
+        return ApiTokenValidationResult.Invalid("Token was not found or has been revoked.");
     }
 
     /// <summary>
@@ -359,8 +361,7 @@ public sealed class TokenService
 
     private static string HashToken(string token)
     {
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(token));
-        return Convert.ToHexString(bytes).ToLowerInvariant();
+        return BCrypt.Net.BCrypt.HashPassword(token, workFactor: 12);
     }
 
     private static string Base64UrlEncode(ReadOnlySpan<byte> bytes) =>
@@ -401,7 +402,6 @@ public sealed record ApiTokenRecord
     public IReadOnlyList<string> Permissions { get; init; } = [];
     public string Status { get; init; } = ApiTokenStatuses.Active;
     public string TokenHash { get; init; } = string.Empty;
-    public string? PlainToken { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset ExpiresAt { get; init; }
     public DateTimeOffset? RotatedAt { get; init; }
