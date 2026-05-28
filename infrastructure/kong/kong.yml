@@ -1,0 +1,99 @@
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: erp-api-hub
+    url: http://erp-api-hub:8008/
+    path: /
+    retries: 3
+    connect_timeout: 5000
+    read_timeout: 30000
+    routes:
+      - name: erp-api-hub-v1
+        paths:
+          - /api/v1
+        strip_path: false
+        regex_priority: 0
+
+  - name: erpnext
+    url: http://erpnext:8080/
+    path: /
+    retries: 3
+    connect_timeout: 5000
+    read_timeout: 30000
+    routes:
+      - name: erpnext-api
+        paths:
+          - /api/method
+        strip_path: false
+        regex_priority: 0
+
+  - name: erp-gateway
+    url: http://erp-gateway:8888/
+    path: /
+    retries: 3
+    routes:
+      - name: erp-gateway-internal
+        paths:
+          - /internal
+        strip_path: false
+        regex_priority: 1
+
+plugins:
+  - name: jwt
+    config:
+      uri_param_names: []
+      cookie_names: []
+      key_claim_name: iss
+      secret_is_base64: false
+      claims_to_verify:
+        - exp
+
+  - name: rate-limiting
+    config:
+      minute: 100
+      policy: redis
+      redis_host: redis
+      redis_port: 6379
+
+  - name: acl
+    config:
+      whitelist:
+        - api-hub-users
+      hide_groups_header: false
+
+  - name: request-transformer
+    config:
+      add:
+        headers:
+          - X-Gateway:Kong
+
+  - name: correlation-id
+    config:
+      header_name: X-Correlation-ID
+      generator: uuid#counter
+
+  - name: cors
+    config:
+      origins:
+        - https://*.hnhtravel.work
+        - http://localhost:3000
+      methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE
+        - PATCH
+      headers:
+        - Authorization
+        - X-Branch-Id
+        - Content-Type
+
+consumers:
+  - username: erphub-client
+    acl_groups:
+      - api-hub-users
+    jwt_credentials:
+      - algorithm: RS256
+        rsa_public_key: "${JWT_RSA_PUBLIC_KEY}"
+        key: erphub-client-key

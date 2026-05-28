@@ -1,0 +1,153 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: erphub_api_db
+      POSTGRES_USER: erphub
+      POSTGRES_PASSWORD: ${ERPHUB_DB_PASSWORD:-erphub}
+    # ports: # Do not publish infra ports by default; uncomment for local dev only
+    #   - "5452:5432"
+    volumes:
+      - erphub-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U erphub -d erphub_api_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: erphub-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis}
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-redis}"]
+    # ports: # Do not publish infra ports by default; uncomment for local dev only
+    #   - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a ${REDIS_PASSWORD:-redis} ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASS:-guest}
+    # ports: # Do not publish infra ports by default; uncomment for local dev only
+    #   - "5672:5672"
+    #   - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/erphub_api_db
+      KC_DB_USERNAME: erphub
+      KC_DB_PASSWORD: ${ERPHUB_DB_PASSWORD:-erphub}
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  erp-api-hub:
+    build:
+      context: .
+      dockerfile: src/ERPApiHub/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=erphub_api_db;Username=erphub;Password=${ERPHUB_DB_PASSWORD:-erphub}
+      Redis__ConnectionString: redis:6379,password=${REDIS_PASSWORD:-redis},abortConnect=false
+      Redis__Password: ${REDIS_PASSWORD:-redis}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ${RABBIT_USER:-guest}
+      RabbitMQ__Password: ${RABBIT_PASS:-guest}
+      RabbitMQ__ExchangeName: 1stopshop_event_bus
+      Keycloak__Authority: http://keycloak:8080/realms/HNHTravel-SGN
+      Keycloak__Audience: erp-api-hub
+      Keycloak__RequireHttpsMetadata: false
+    ports:
+      - "8008:8008"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+
+  erp-gateway:
+    build:
+      context: .
+      dockerfile: src/ERPApiHub/Dockerfile.gateway
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Authentication__Authority: http://keycloak:8080/realms/HNHTravel-SGN
+      Authentication__Audience: ${KEYCLOAK_AUDIENCE:-1stopshop-api}
+      Authentication__RequireHttpsMetadata: "false"
+      ReverseProxy__Clusters__erp-api-hub__Destinations__primary__Address: http://erp-api-hub:8008/
+    ports:
+      - "8888:8888"
+    depends_on:
+      erp-api-hub:
+        condition: service_started
+      keycloak:
+        condition: service_started
+
+  erp-worker:
+    build:
+      context: .
+      dockerfile: src/ERPApiHub/Dockerfile.worker
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Default: Host=postgres;Port=5432;Database=erphub_api_db;Username=erphub;Password=${ERPHUB_DB_PASSWORD:-erphub}
+      Redis__ConnectionString: redis:6379,password=${REDIS_PASSWORD:-redis},abortConnect=false
+      Redis__Password: ${REDIS_PASSWORD:-redis}
+      RabbitMQ__Host: rabbitmq
+      RabbitMQ__Username: ${RABBIT_USER:-guest}
+      RabbitMQ__Password: ${RABBIT_PASS:-guest}
+      RabbitMQ__ExchangeName: 1stopshop_event_bus
+      RabbitMQ__IngestionQueue: erphub.ingestion
+      RabbitMQ__IngestionBindingKey: erphub.ingestion.#
+      RabbitMQ__IngestionDeadLetterQueue: erphub.dlq.ingestion
+    expose:
+      - "8009"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  kong:
+    build:
+      context: .
+      dockerfile: infrastructure/kong/Dockerfile
+    environment:
+      KONG_DATABASE: off
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/declarative/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: "off"
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    depends_on:
+      - erp-api-hub
+      - erp-gateway
+
+volumes:
+  erphub-postgres-data:

@@ -1,0 +1,22 @@
+FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
+WORKDIR /src
+
+COPY ERPApiHub.sln ./
+COPY Directory.Build.props ./
+COPY src/ERPApiHub/ERPApiHub.Domain/ERPApiHub.Domain.csproj src/ERPApiHub/ERPApiHub.Domain/
+COPY src/ERPApiHub/ERPApiHub.Application/ERPApiHub.Application.csproj src/ERPApiHub/ERPApiHub.Application/
+COPY src/ERPApiHub/ERPApiHub.Infrastructure/ERPApiHub.Infrastructure.csproj src/ERPApiHub/ERPApiHub.Infrastructure/
+COPY src/ERPApiHub/ERPApiHub.API/ERPApiHub.API.csproj src/ERPApiHub/ERPApiHub.API/
+COPY src/ERPApiHub/ERPApiHub.Gateway/ERPApiHub.Gateway.csproj src/ERPApiHub/ERPApiHub.Gateway/
+COPY src/ERPApiHub/ERPApiHub.Worker/ERPApiHub.Worker.csproj src/ERPApiHub/ERPApiHub.Worker/
+COPY tests/ERPApiHub.Tests/ERPApiHub.Tests.csproj tests/ERPApiHub.Tests/
+RUN dotnet restore ERPApiHub.sln
+
+COPY . .
+RUN dotnet publish src/ERPApiHub/ERPApiHub.API/ERPApiHub.API.csproj -c Release -o /app/publish --no-restore
+
+FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
+WORKDIR /app
+COPY --from=build /app/publish .
+EXPOSE 8008
+ENTRYPOINT ["dotnet", "ERPApiHub.API.dll"]
