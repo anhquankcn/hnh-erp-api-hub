@@ -141,12 +141,10 @@ public sealed class PollingWorker(
             }
         }
 
-        if (changes.Length == 0)
+        if (changes.Length > 0)
         {
-            nextCursor = DateTimeOffset.UtcNow;
+            await cache.SetAsync(cursorKey, nextCursor.ToString("O"), _pollingOptions.CursorTtl, cancellationToken);
         }
-
-        await cache.SetAsync(cursorKey, nextCursor.ToString("O"), _pollingOptions.CursorTtl, cancellationToken);
 
         logger.LogInformation(
             "ERPNext polling completed for tenant {TenantId} doctype {Doctype}. Published {ChangeCount} changes.",
