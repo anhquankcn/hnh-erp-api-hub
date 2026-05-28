@@ -12,6 +12,7 @@ using ERPApiHub.Application.Observability;
 using ERPApiHub.Application.Query;
 using ERPApiHub.Application.RateLimiting;
 using ERPApiHub.Application.Webhooks;
+using ERPApiHub.API.Middleware;
 using ERPApiHub.Infrastructure;
 using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
@@ -20,10 +21,13 @@ using ERPApiHub.Infrastructure.Security;
 using Hangfire;
 using Hangfire.Dashboard;
 using Hangfire.Redis.StackExchange;
+using Asp.Versioning;
+using Asp.Versioning.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using ApplicationCacheService = ERPApiHub.Application.Abstractions.ICacheService;
+using OpenTelemetry.Metrics;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -53,6 +57,13 @@ builder.Services.AddCors(options =>
 });
 builder.Services.AddErpHubInfrastructure(builder.Configuration);
 builder.Services.AddKeycloakJwtAuthentication(builder.Configuration, builder.Environment);
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics =>
+    {
+        metrics
+            .AddMeter(ErpHubMetrics.MeterName)
+            .AddPrometheusExporter();
+    });
 
 // S4-001: Multi-level caching
 builder.Services.Configure<CacheOptions>(builder.Configuration.GetSection(CacheOptions.SectionName));
@@ -86,6 +97,7 @@ if (builder.Configuration.GetSection(JobOptions.SectionName).Get<JobOptions>()?.
 // Application layer services
 builder.Services.AddSingleton<AllowedDoctypeValidator>();
 builder.Services.AddScoped<IngestionService>();
+builder.Services.AddScoped<InvoiceDeletionGuard>();
 builder.Services.AddScoped<QueryService>();
 builder.Services.AddScoped<AuditService>();
 builder.Services.AddSingleton<PiiMaskingService>();
@@ -137,7 +149,21 @@ builder.Services
     .AddCheck<RabbitMqHealthCheck>("rabbitmq", tags: ["ready"])
     .AddCheck<ErpNextHealthCheck>("erpnext", tags: ["ready"]);
 
+// S5-005: API Versioning
+builder.Services.AddApiVersioning(options =>
+{
+    options.DefaultApiVersion = new ApiVersion(1, 0);
+    options.AssumeDefaultVersionWhenUnspecified = true;
+    options.ReportApiVersions = true;
+}).AddApiExplorer();
+
 var app = builder.Build();
+
+var apiVersionSet = app.NewApiVersionSet()
+    .HasApiVersion(new ApiVersion(1, 0))
+    .HasApiVersion(new ApiVersion(2, 0))
+    .ReportApiVersions()
+    .Build();
 
 if (app.Environment.IsDevelopment())
 {
@@ -157,6 +183,9 @@ app.UseAuthentication();
 
 // S3-001: Rate limiting middleware (after auth so context.User is populated)
 app.UseMiddleware<RateLimitMiddleware>();
+
+// S5-007: Prometheus metrics collection
+app.UseMiddleware<MetricsMiddleware>();
 
 app.UseAuthorization();
 
@@ -182,7 +211,10 @@ app.MapPost("/api/v1/auth/refresh", async (RefreshTokenRequest req, ERPApiHub.Ap
 {
     var result = await service.RefreshTokenAsync(req.RefreshToken, ct);
     return result is null ? Results.Unauthorized() : Results.Ok(result);
-}).AllowAnonymous();
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .AllowAnonymous();
 
 app.MapPost("/api/v1/auth/revoke", async (HttpContext ctx, RevokeTokenRequest req, ERPApiHub.Application.Auth.TokenService service, CancellationToken ct) =>
 {
@@ -198,19 +230,95 @@ app.MapPost("/api/v1/auth/revoke", async (HttpContext ctx, RevokeTokenRequest re
 
     await service.RevokeTokenAsync(jti, TimeSpan.FromHours(1), ct);
     return Results.Ok(new { message = "Token revoked" });
-}).RequireAuthorization();
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization();
 
 app.MapPost("/api/v1/auth/verify", (VerifyTokenRequest req, ERPApiHub.Application.Auth.TokenService service) =>
 {
     var verify = service.ValidateAndDecodeToken(req.Token);
     return verify is not null ? Results.Ok(verify) : Results.Unauthorized();
-}).AllowAnonymous();
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .AllowAnonymous();
 
 // Root & health
 app.MapGet("/", () => Results.Ok(new { service = "erp-api-hub", status = "running" }))
     .AllowAnonymous();
-app.MapGet("/v1/health", () => Results.Ok(new { status = "ok" }))
+
+app.MapPrometheusScrapingEndpoint("/metrics").AllowAnonymous();
+
+// S5-005: Version Discovery
+app.MapGet("/versions", () => Results.Ok(new
+{
+    versions = new[] { "1.0", "2.0" },
+    deprecated = new[] { "1.0" },
+    sunsetDate = "2026-12-31T00:00:00Z"
+})).AllowAnonymous();
+
+// ─── Versioned Health Endpoints ───
+
+// v1 Health — basic (deprecated, gets Sunset header)
+app.MapGet("/api/v1/health", () => Results.Ok(new { status = "ok", version = "1.0" }))
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
     .AllowAnonymous();
+
+// v2 Health — enhanced with uptime
+app.MapGet("/api/v2/health", () =>
+{
+    var uptime = DateTimeOffset.UtcNow - System.Diagnostics.Process.GetCurrentProcess().StartTime;
+    return Results.Ok(new
+    {
+        status = "ok",
+        version = "2.0",
+        uptime = uptime.TotalSeconds,
+        uptimeFormatted = $"{uptime.Days}d {uptime.Hours}h {uptime.Minutes}m"
+    });
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(2, 0)
+    .AllowAnonymous();
+
+// v2 Detailed Health — full check results
+app.MapGet("/api/v2/health/detailed", async (HealthCheckService healthCheckService, CancellationToken ct) =>
+{
+    var report = await healthCheckService.CheckHealthAsync(ct);
+    return Results.Ok(new
+    {
+        status = report.Status.ToString(),
+        version = "2.0",
+        checkedAt = DateTimeOffset.UtcNow,
+        checks = report.Entries.Select(e => new
+        {
+            name = e.Key,
+            status = e.Value.Status.ToString(),
+            description = e.Value.Description,
+            duration = e.Value.Duration.TotalMilliseconds
+        })
+    });
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(2, 0)
+    .AllowAnonymous();
+
+// Sunset header middleware for v1 responses
+app.Use(async (context, next) =>
+{
+    await next();
+
+    var hasV1Metadata = context.GetEndpoint()?.Metadata.GetMetadata<ApiVersionAttribute>()?.Versions
+        ?.Any(v => v.MajorVersion == 1 && v.MinorVersion == 0) == true;
+    var isV1Path = context.Request.Path.StartsWithSegments("/api/v1");
+
+    if (context.Response.StatusCode is >= 200 and < 300 && (hasV1Metadata || isV1Path))
+    {
+        context.Response.Headers.Append("Sunset", "Sat, 31 Dec 2026 00:00:00 GMT");
+        context.Response.Headers.Append("Deprecation", "true");
+    }
+});
 
 // ─── Ingestion Endpoints (S2-001, S2-002, S2-008) ───
 
@@ -220,19 +328,28 @@ app.MapPost("/api/v1/ingest/{doctype}", async (string doctype, IngestionRequest 
     var fullRequest = request with { Doctype = doctype, IdempotencyKey = idempotencyKey };
     var response = await service.IngestAsync(fullRequest.Doctype, fullRequest.Payload, fullRequest.Name, ct);
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
-}).RequireAuthorization("api-hub:write");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:write");
 
 app.MapPut("/api/v1/ingest/{doctype}/{name}", async (string doctype, string name, JsonElement payload, IngestionService service, HttpContext ctx, CancellationToken ct) =>
 {
     var response = await service.UpdateAsync(doctype, name, payload, ct);
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
-}).RequireAuthorization("api-hub:write");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:write");
 
 app.MapDelete("/api/v1/ingest/{doctype}/{name}", async (string doctype, string name, IngestionService service, HttpContext ctx, CancellationToken ct) =>
 {
     var response = await service.DeleteAsync(doctype, name, ct);
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
-}).RequireAuthorization("api-hub:write");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:write");
 
 app.MapPost("/api/v1/ingest/batch", async (List<IngestionRequest> operations, IngestionService service, CancellationToken ct) =>
 {
@@ -241,7 +358,10 @@ app.MapPost("/api/v1/ingest/batch", async (List<IngestionRequest> operations, In
         .ToList();
     var response = await service.BatchIngestAsync(batchOperations, ct);
     return Results.Accepted($"/api/v1/ingest/status/{response.JobId}", response);
-}).RequireAuthorization("api-hub:write");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:write");
 
 // ─── Ingestion Status & DLQ (S2-003) ───
 
@@ -249,7 +369,10 @@ app.MapGet("/api/v1/ingest/status/{jobId}", async (string jobId, IRedisCacheServ
 {
     var status = await cache.GetAsync<object>($"job:{jobId}", ct);
     return status is null ? Results.NotFound(new { error = "Job not found" }) : Results.Ok(status);
-}).RequireAuthorization("api-hub:read");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:read");
 
 app.MapGet("/api/v1/ingest/dlq", async (int? page, int? pageSize, DlqManagementService dlqService, CancellationToken ct) =>
 {
@@ -264,13 +387,19 @@ app.MapGet("/api/v1/ingest/dlq", async (int? page, int? pageSize, DlqManagementS
         page = normalizedPage,
         pageSize = normalizedPageSize
     });
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapPost("/api/v1/ingest/dlq/{id}/replay", async (string id, DlqManagementService dlqService, CancellationToken ct) =>
 {
     await dlqService.ReplayAsync(id, ct);
     return Results.Accepted(null, new { message = $"Replay requested for DLQ message {id}" });
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 // ─── Query Endpoints (S2-004) ───
 
@@ -288,7 +417,10 @@ app.MapGet("/api/v1/query/{doctype}", async (string doctype, int? page, int? pag
 
     var response = await queryService.ListAsync(request, ct);
     return Results.Ok(response);
-}).RequireAuthorization("api-hub:read");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:read");
 
 app.MapGet("/api/v1/query/{doctype}/stream", (string doctype, int? pageSize, int? maxPages, string? filters, string? orderBy, string? fields, QueryService queryService, CancellationToken ct) =>
 {
@@ -302,19 +434,28 @@ app.MapGet("/api/v1/query/{doctype}/{name}", async (string doctype, string name,
 {
     var result = await queryService.GetAsync(doctype, name, ct);
     return Results.Ok(result);
-}).RequireAuthorization("api-hub:read");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:read");
 
 app.MapGet("/api/v1/query/{doctype}/count", async (string doctype, QueryService queryService, CancellationToken ct) =>
 {
     var result = await queryService.CountAsync(doctype, ct);
     return Results.Ok(result);
-}).RequireAuthorization("api-hub:read");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:read");
 
 app.MapDelete("/api/v1/cache/{doctype}", async (string doctype, QueryService queryService, CancellationToken ct) =>
 {
     await queryService.PurgeCacheAsync(doctype, ct);
     return Results.Ok(new { message = $"Cache purged for {doctype}" });
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 // ─── Audit Endpoints (S2-007) ───
 
@@ -325,7 +466,10 @@ app.MapGet("/api/v1/audit/logs", async (string? tenantId, string? userId, string
 
     var result = await auditService.QueryLogsAsync(tenantId, userId, endpoint, statusCode, from, to, page ?? 1, pageSize ?? 20, ct);
     return Results.Ok(result);
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapGet("/api/v1/audit/logs/export", async (string? tenantId, string? fromDate, string? toDate, AuditService auditService, CancellationToken ct) =>
 {
@@ -334,7 +478,10 @@ app.MapGet("/api/v1/audit/logs/export", async (string? tenantId, string? fromDat
 
     var csv = await auditService.ExportLogsAsCsvAsync(tenantId, from, to, ct);
     return Results.Text(csv, "text/csv", Encoding.UTF8);
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 // ─── Webhook Endpoints (S2-006) ───
 
@@ -343,32 +490,47 @@ app.MapPost("/api/v1/webhooks/subscriptions", async (CreateWebhookSubscriptionRe
     var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
     var sub = await service.CreateAsync(req.SystemId, req.EventTypes, req.WebhookUrl, req.Secret, tenantId, ct);
     return Results.Created($"/api/v1/webhooks/subscriptions/{sub.SubscriptionId}", sub);
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapGet("/api/v1/webhooks/subscriptions", async (WebhookSubscriptionService service, HttpContext ctx, CancellationToken ct) =>
 {
     var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
     var subs = await service.ListByTenantAsync(tenantId, ct);
     return Results.Ok(subs);
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapPut("/api/v1/webhooks/subscriptions/{id}", async (string id, UpdateWebhookSubscriptionRequest req, WebhookSubscriptionService service, CancellationToken ct) =>
 {
     var sub = await service.UpdateAsync(id, req.EventTypes, req.WebhookUrl, req.Secret, ct);
     return Results.Ok(sub);
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapDelete("/api/v1/webhooks/subscriptions/{id}", async (string id, WebhookSubscriptionService service, CancellationToken ct) =>
 {
     await service.DeleteAsync(id, ct);
     return Results.NoContent();
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapGet("/api/v1/webhooks/deliveries/{subscriptionId}", async (string subscriptionId, WebhookDeliveryService service, CancellationToken ct) =>
 {
     var deliveries = await service.ListDeliveriesAsync(subscriptionId, ct);
     return Results.Ok(deliveries);
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 // ─── ERPNext Event Ingestion Endpoint (S3-003) ───
 
@@ -411,38 +573,56 @@ app.MapPost("/api/v1/systems", async (CreateExternalSystemRequest req, ExternalS
     var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
     var system = await service.CreateAsync(req, tenantId, ct);
     return Results.Created($"/api/v1/systems/{system.SystemId}", system);
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapGet("/api/v1/systems", async (int? page, int? pageSize, ExternalSystemService service, HttpContext ctx, CancellationToken ct) =>
 {
     var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
     var (systems, total) = await service.ListAsync(tenantId, page ?? 1, pageSize ?? 20, ct);
     return Results.Ok(new { items = systems, total });
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapGet("/api/v1/systems/{systemId}", async (string systemId, ExternalSystemService service, CancellationToken ct) =>
 {
     var system = await service.GetByIdAsync(systemId, ct);
     return system is null ? Results.NotFound(new { error = "System not found" }) : Results.Ok(system);
-}).RequireAuthorization("api-hub:read");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:read");
 
 app.MapPut("/api/v1/systems/{systemId}", async (string systemId, UpdateExternalSystemRequest req, ExternalSystemService service, CancellationToken ct) =>
 {
     var system = await service.UpdateAsync(systemId, req, ct);
     return Results.Ok(system);
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapDelete("/api/v1/systems/{systemId}", async (string systemId, ExternalSystemService service, CancellationToken ct) =>
 {
     await service.DeleteAsync(systemId, ct);
     return Results.NoContent();
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 app.MapPost("/api/v1/systems/{systemId}/rotate-key", async (string systemId, RotateApiKeyRequest req, ExternalSystemService service, CancellationToken ct) =>
 {
     var mapping = await service.RotateApiKeyAsync(systemId, req.NewApiKey, req.NewApiSecret, ct);
     return Results.Ok(new { mapping_id = mapping.MappingId, created_at = mapping.CreatedAt });
-}).RequireAuthorization("api-hub:admin");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:admin");
 
 // ─── Vietnam Compliance Endpoints (S3-006) ───
 
@@ -450,19 +630,28 @@ app.MapPost("/api/v1/compliance/tax-id/validate", (TaxIdValidationRequest req, V
 {
     var (isValid, error) = service.ValidateTaxId(req.TaxId);
     return Results.Ok(new { valid = isValid, error });
-}).RequireAuthorization("api-hub:read");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:read");
 
 app.MapPost("/api/v1/compliance/e-invoice/validate", (EInvoiceRequest req, VietnamComplianceService service) =>
 {
     var (isValid, errors) = service.ValidateEInvoice(req);
     return Results.Ok(new { valid = isValid, errors });
-}).RequireAuthorization("api-hub:read");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:read");
 
 app.MapPost("/api/v1/compliance/invoice-template/validate", (InvoiceTemplateValidationRequest req, VietnamComplianceService service) =>
 {
     var (isValid, error) = service.ValidateInvoiceTemplate(req.Template);
     return Results.Ok(new { valid = isValid, error });
-}).RequireAuthorization("api-hub:read");
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
+    .RequireAuthorization("api-hub:read");
 
 // ─── Health Checks ───
 

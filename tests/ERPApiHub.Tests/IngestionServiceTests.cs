@@ -1,5 +1,6 @@
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Application.Exceptions;
 using ERPApiHub.Application.Ingestion;
 using ERPApiHub.Infrastructure.Data;
 using ERPApiHub.Infrastructure.Messaging;
@@ -18,6 +19,7 @@ public sealed class IngestionServiceTests
     private readonly Mock<IAllowedDoctypeValidator> _doctypeValidator = new();
     private readonly Mock<ICacheService> _cache = new();
     private readonly Mock<IMessageBus> _messageBus = new();
+    private readonly Mock<IErpNextClient> _erpNextClient = new();
     private Mock<IHttpContextAccessor> _httpContextAccessor = new();
     private readonly Mock<ILogger<IngestionService>> _logger = new();
 
@@ -40,7 +42,8 @@ public sealed class IngestionServiceTests
         var claims = new List<System.Security.Claims.Claim>
         {
             new("BranchId", branchId),
-            new(System.Security.Claims.ClaimTypes.NameIdentifier, userId)
+            new(System.Security.Claims.ClaimTypes.NameIdentifier, userId),
+            new(System.Security.Claims.ClaimTypes.Role, "user")
         };
         var identity = new System.Security.Claims.ClaimsIdentity(claims, "test");
         var principal = new System.Security.Claims.ClaimsPrincipal(identity);
@@ -56,12 +59,15 @@ public sealed class IngestionServiceTests
 
     private IngestionService CreateService()
     {
+        var invoiceDeletionGuard = new InvoiceDeletionGuard(_erpNextClient.Object);
         return new IngestionService(
             _doctypeValidator.Object,
             _cache.Object,
             _repository,
             _httpContextAccessor.Object,
             _messageBus.Object,
+            invoiceDeletionGuard,
+            _erpNextClient.Object,
             _logger.Object);
     }
 
@@ -183,5 +189,151 @@ public sealed class IngestionServiceTests
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
             service.DeleteAsync("ForbiddenDoc", "doc-1", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task DeleteAsync_WhenIssuedSalesInvoiceWithoutForce_ThrowsBlockedException()
+    {
+        _doctypeValidator.Setup(x => x.IsAllowed("Sales Invoice")).Returns(true);
+        SetupIssuedInvoice();
+
+        var service = CreateService();
+
+        var exception = await Assert.ThrowsAsync<InvoiceDeletionBlockedException>(() =>
+            service.DeleteAsync("Sales Invoice", "INV-001", CancellationToken.None));
+
+        Assert.Equal("Invoice has been issued", exception.Reason);
+        _messageBus.Verify(x => x.PublishAsync(
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            It.IsAny<object>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+
+        var auditLogs = await _dbContext.AuditLogs.ToListAsync();
+        Assert.Single(auditLogs);
+        Assert.Equal("INVOICE_DELETE_BLOCKED", auditLogs[0].Method);
+        Assert.Equal(409, auditLogs[0].StatusCode);
+    }
+
+    [Fact]
+    public async Task DeleteAsync_WhenIssuedSalesInvoiceForcedByAdmin_PublishesAndAuditsSoftDelete()
+    {
+        SetupAdminHttpContext(force: true);
+        _doctypeValidator.Setup(x => x.IsAllowed("Sales Invoice")).Returns(true);
+        SetupIssuedInvoice();
+        SetupSuccessfulPublish();
+
+        var service = CreateService();
+
+        var result = await service.DeleteAsync("Sales Invoice", "INV-001", CancellationToken.None);
+
+        Assert.Equal("pending", result.Status);
+        _messageBus.Verify(x => x.PublishAsync(
+            string.Empty,
+            It.Is<string>(rk => rk.Contains("Sales Invoice") && rk.Contains("deleted")),
+            It.IsAny<object>(),
+            It.IsAny<CancellationToken>()), Times.Once);
+
+        var auditLogs = await _dbContext.AuditLogs.ToListAsync();
+        Assert.Contains(auditLogs, log => log.Method == "INVOICE_SOFT_DELETE");
+    }
+
+    [Fact]
+    public async Task UpdateAsync_WhenIssuedSalesInvoiceCancelledWithoutReason_ThrowsBlockedException()
+    {
+        _doctypeValidator.Setup(x => x.IsAllowed("Sales Invoice")).Returns(true);
+        SetupIssuedInvoice();
+
+        var service = CreateService();
+        var payload = JsonDocument.Parse("{\"status\":\"Cancelled\"}").RootElement;
+
+        var exception = await Assert.ThrowsAsync<InvoiceStatusChangeBlockedException>(() =>
+            service.UpdateAsync("Sales Invoice", "INV-001", payload, CancellationToken.None));
+
+        Assert.Equal("Reason is required when cancelling an issued invoice", exception.Reason);
+        _messageBus.Verify(x => x.PublishAsync(
+            It.IsAny<string>(),
+            It.IsAny<string>(),
+            It.IsAny<object>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+
+        var auditLogs = await _dbContext.AuditLogs.ToListAsync();
+        Assert.Single(auditLogs);
+        Assert.Equal("INVOICE_STATUS_CHANGE_BLOCKED", auditLogs[0].Method);
+    }
+
+    [Fact]
+    public async Task UpdateAsync_WhenIssuedSalesInvoiceCancelledWithReason_PublishesAndAudits()
+    {
+        _doctypeValidator.Setup(x => x.IsAllowed("Sales Invoice")).Returns(true);
+        SetupIssuedInvoice();
+        SetupSuccessfulPublish();
+
+        var service = CreateService();
+        var payload = JsonDocument.Parse("{\"status\":\"Cancelled\",\"reason\":\"Duplicate invoice\"}").RootElement;
+
+        var result = await service.UpdateAsync("Sales Invoice", "INV-001", payload, CancellationToken.None);
+
+        Assert.Equal("pending", result.Status);
+
+        var auditLogs = await _dbContext.AuditLogs.ToListAsync();
+        Assert.Contains(auditLogs, log => log.Method == "INVOICE_STATUS_CHANGE");
+        Assert.Contains(auditLogs, log => log.Method == "PUT");
+    }
+
+    [Fact]
+    public async Task InvoiceDeletionGuard_WhenDoctypeIsNotSalesInvoice_AllowsWithoutErpNextCall()
+    {
+        var guard = new InvoiceDeletionGuard(_erpNextClient.Object);
+
+        var result = await guard.CanDeleteAsync("Customer", "CUST-001", false, "user", CancellationToken.None);
+
+        Assert.True(result.CanDelete);
+        Assert.False(result.RequiresAudit);
+        _erpNextClient.Verify(x => x.GetAsync<JsonElement>(
+            It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    private void SetupIssuedInvoice()
+    {
+        var invoice = JsonDocument.Parse("{\"data\":{\"status\":\"Issued\"}}").RootElement;
+        _erpNextClient.Setup(x => x.GetAsync<JsonElement>(
+                "Sales Invoice/INV-001",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new ErpNextResponse<JsonElement>(invoice, 200, null));
+    }
+
+    private void SetupSuccessfulPublish()
+    {
+        _cache.Setup(x => x.SetAsync(It.IsAny<string>(), It.IsAny<object>(), It.IsAny<TimeSpan?>(), default))
+            .Returns(Task.CompletedTask);
+
+        _messageBus.Setup(x => x.PublishAsync(
+                It.IsAny<string>(),
+                It.IsAny<string>(),
+                It.IsAny<object>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+    }
+
+    private void SetupAdminHttpContext(bool force)
+    {
+        var claims = new List<System.Security.Claims.Claim>
+        {
+            new("BranchId", "SGN"),
+            new(System.Security.Claims.ClaimTypes.NameIdentifier, "admin-123"),
+            new(System.Security.Claims.ClaimTypes.Role, "admin")
+        };
+        var identity = new System.Security.Claims.ClaimsIdentity(claims, "test");
+        var principal = new System.Security.Claims.ClaimsPrincipal(identity);
+
+        var httpContext = new DefaultHttpContext { User = principal };
+        httpContext.Request.Headers["X-Request-ID"] = "corr-123";
+        httpContext.Request.QueryString = new QueryString($"?force={force.ToString().ToLowerInvariant()}");
+
+        var accessor = new Mock<IHttpContextAccessor>();
+        accessor.Setup(x => x.HttpContext).Returns(httpContext);
+        _httpContextAccessor = accessor;
     }
 }

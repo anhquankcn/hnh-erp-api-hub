@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -71,13 +72,41 @@ public sealed class RequestLoggingMiddleware
 public static class ErpHubMetrics
 {
     public static readonly ActivitySource ActivitySource = new("ERPApiHub", "1.0.0");
+    public const string MeterName = "ERPApiHub";
 
-    // Counter names for OpenTelemetry
-    public const string RequestsTotalMetric = "erphub.requests.total";
-    public const string RequestDurationMetric = "erphub.request.duration";
-    public const string IngestionTotalMetric = "erphub.ingestion.total";
-    public const string IngestionErrorsMetric = "erphub.ingestion.errors";
-    public const string WebhookDeliveriesMetric = "erphub.webhook.deliveries";
-    public const string RateLimitHitsMetric = "erphub.rate_limit.hits";
-    public const string CacheHitRatioMetric = "erphub.cache.hit_ratio";
+    private static readonly Meter Meter = new(MeterName, "1.0.0");
+
+    public static readonly Counter<long> RequestsTotal = Meter.CreateCounter<long>(
+        RequestsTotalMetric,
+        description: "Total HTTP requests.");
+
+    public static readonly Histogram<double> RequestDuration = Meter.CreateHistogram<double>(
+        RequestDurationMetric,
+        unit: "s",
+        description: "HTTP request duration in seconds.");
+
+    public static readonly Counter<long> ErrorsTotal = Meter.CreateCounter<long>(
+        ErrorsTotalMetric,
+        description: "Total unhandled request errors.");
+
+    public static readonly Counter<long> CacheHits = Meter.CreateCounter<long>(
+        CacheHitsMetric,
+        description: "Total cache hits.");
+
+    public static readonly Counter<long> CacheMisses = Meter.CreateCounter<long>(
+        CacheMissesMetric,
+        description: "Total cache misses.");
+
+    public static readonly Counter<long> IngestionJobs = Meter.CreateCounter<long>(
+        IngestionJobsMetric,
+        description: "Total ingestion jobs by status.");
+
+    public const string RequestsTotalMetric = "erp_api_hub.requests.total";
+    public const string RequestDurationMetric = "erp_api_hub.request.duration";
+    public const string ErrorsTotalMetric = "erp_api_hub.errors.total";
+    public const string CacheHitsMetric = "erp_api_hub.cache.hits";
+    public const string CacheMissesMetric = "erp_api_hub.cache.misses";
+    public const string IngestionJobsMetric = "erp_api_hub.ingestion.jobs";
+    public const string WebhookDeliveriesMetric = "erp_api_hub.webhook.deliveries";
+    public const string RateLimitHitsMetric = "erp_api_hub.rate_limit.hits";
 }

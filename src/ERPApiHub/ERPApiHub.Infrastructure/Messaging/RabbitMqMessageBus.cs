@@ -43,6 +43,12 @@ public sealed class RabbitMqMessageBus(
             cancellationToken);
     }
 
+    public async Task<bool> IsConnectedAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = await connectionFactory.CreateConnectionAsync(cancellationToken);
+        return connection.IsOpen;
+    }
+
     private static string? GetStringProperty<T>(T message, string propertyName)
     {
         if (message is null)

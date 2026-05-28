@@ -20,7 +20,10 @@ public interface IErpNextClient
 public sealed record ErpNextResponse<T>(
     T? Data,
     int StatusCode,
-    string? Message);
+    string? Message)
+{
+    public bool IsSuccessStatusCode => StatusCode >= 200 && StatusCode <= 299;
+}
 
 public sealed record ErpEventEnvelope(
     string EventId,

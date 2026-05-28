@@ -1,6 +1,8 @@
 using System.Security.Claims;
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Application.Exceptions;
+using ERPApiHub.Application.Observability;
 using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
 using Microsoft.AspNetCore.Http;
@@ -53,9 +55,14 @@ public sealed class IngestionService : IIngestionService
     private readonly IErpHubRepository _repository;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly IMessageBus _messageBus;
+    private readonly InvoiceDeletionGuard _invoiceDeletionGuard;
+    private readonly IErpNextClient _erpNextClient;
     private readonly ILogger<IngestionService> _logger;
     private static readonly TimeSpan IdempotencyTtl = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan JobTtl = TimeSpan.FromHours(24);
+    private const string SalesInvoiceDoctype = "Sales Invoice";
+    private const string IssuedStatus = "Issued";
+    private const string CancelledStatus = "Cancelled";
 
     public IngestionService(
         IAllowedDoctypeValidator doctypeValidator,
@@ -63,6 +70,8 @@ public sealed class IngestionService : IIngestionService
         IErpHubRepository repository,
         IHttpContextAccessor httpContextAccessor,
         IMessageBus messageBus,
+        InvoiceDeletionGuard invoiceDeletionGuard,
+        IErpNextClient erpNextClient,
         ILogger<IngestionService> logger)
     {
         _doctypeValidator = doctypeValidator;
@@ -70,6 +79,8 @@ public sealed class IngestionService : IIngestionService
         _repository = repository;
         _httpContextAccessor = httpContextAccessor;
         _messageBus = messageBus;
+        _invoiceDeletionGuard = invoiceDeletionGuard;
+        _erpNextClient = erpNextClient;
         _logger = logger;
     }
 
@@ -83,11 +94,14 @@ public sealed class IngestionService : IIngestionService
         var correlationId = GetCorrelationId();
         var idempotencyKey = GetIdempotencyKey();
         var jobId = UlidGenerator.Generate();
+        var response = new IngestionResponse(jobId, "pending", correlationId);
+        string? idempotencyCacheKey = null;
+        var idempotencyClaimed = false;
 
         // Idempotency check
         if (!string.IsNullOrEmpty(idempotencyKey))
         {
-            var idempotencyCacheKey = $"idempotency:{tenantId}:{idempotencyKey}";
+            idempotencyCacheKey = $"idempotency:{tenantId}:{idempotencyKey}";
             var cached = await _cache.GetAsync<IngestionResponse>(idempotencyCacheKey, cancellationToken);
             if (cached is not null)
             {
@@ -102,9 +116,30 @@ public sealed class IngestionService : IIngestionService
             throw new ArgumentException($"Doctype '{doctype}' is not in the allowed list.");
         }
 
+        if (!string.IsNullOrEmpty(name))
+        {
+            await ValidateInvoiceStatusChangeAsync(tenantId, doctype, name, payload, cancellationToken);
+        }
+
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
+            if (idempotencyCacheKey is not null)
+            {
+                idempotencyClaimed = await _cache.TrySetAsync(idempotencyCacheKey, response, IdempotencyTtl, cancellationToken);
+                if (!idempotencyClaimed)
+                {
+                    var cached = await _cache.GetAsync<IngestionResponse>(idempotencyCacheKey, cancellationToken);
+                    if (cached is not null)
+                    {
+                        _logger.LogInformation("Idempotency cache hit for key {IdempotencyKey}", idempotencyKey);
+                        return cached;
+                    }
+
+                    throw new InvalidOperationException("Idempotency key is already being processed.");
+                }
+            }
+
             // Publish to RabbitMQ
             await PublishEventAsync(
                 doctype,
@@ -119,24 +154,23 @@ public sealed class IngestionService : IIngestionService
             // Store job status in Redis
             var jobStatus = new JobStatusResponse(jobId, "pending", DateTimeOffset.UtcNow, null, null);
             await _cache.SetAsync($"job:{jobId}", jobStatus, JobTtl, cancellationToken);
+            RecordIngestionJob("queued");
 
             // Audit log
             await AuditAsync(tenantId, "POST", $"/api/v1/ingest/{doctype}", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
-
-            var response = new IngestionResponse(jobId, "pending", correlationId);
-
-            // Cache idempotency result
-            if (!string.IsNullOrEmpty(idempotencyKey))
-            {
-                await _cache.SetAsync($"idempotency:{tenantId}:{idempotencyKey}", response, IdempotencyTtl, cancellationToken);
-            }
 
             return response;
         }
         catch (Exception ex)
         {
+            if (idempotencyClaimed && idempotencyCacheKey is not null)
+            {
+                await _cache.RemoveAsync(idempotencyCacheKey, cancellationToken);
+            }
+
             stopwatch.Stop();
             _logger.LogError(ex, "Ingestion failed for doctype {Doctype}", doctype);
+            RecordIngestionJob("failed");
             await AuditAsync(tenantId, "POST", $"/api/v1/ingest/{doctype}", 500, stopwatch.ElapsedMilliseconds, cancellationToken);
             throw;
         }
@@ -157,6 +191,8 @@ public sealed class IngestionService : IIngestionService
             throw new ArgumentException($"Doctype '{doctype}' is not in the allowed list.");
         }
 
+        await ValidateInvoiceStatusChangeAsync(tenantId, doctype, name, payload, cancellationToken);
+
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
@@ -172,6 +208,7 @@ public sealed class IngestionService : IIngestionService
 
             var jobStatus = new JobStatusResponse(jobId, "pending", DateTimeOffset.UtcNow, null, null);
             await _cache.SetAsync($"job:{jobId}", jobStatus, JobTtl, cancellationToken);
+            RecordIngestionJob("queued");
 
             await AuditAsync(tenantId, "PUT", $"/api/v1/ingest/{doctype}/{name}", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
 
@@ -181,6 +218,7 @@ public sealed class IngestionService : IIngestionService
         {
             stopwatch.Stop();
             _logger.LogError(ex, "Update failed for doctype {Doctype} name {Name}", doctype, name);
+            RecordIngestionJob("failed");
             await AuditAsync(tenantId, "PUT", $"/api/v1/ingest/{doctype}/{name}", 500, stopwatch.ElapsedMilliseconds, cancellationToken);
             throw;
         }
@@ -200,6 +238,40 @@ public sealed class IngestionService : IIngestionService
             throw new ArgumentException($"Doctype '{doctype}' is not in the allowed list.");
         }
 
+        if (string.Equals(doctype, SalesInvoiceDoctype, StringComparison.Ordinal))
+        {
+            var result = await _invoiceDeletionGuard.CanDeleteAsync(
+                doctype,
+                name,
+                GetForceDelete(),
+                GetUserRole(),
+                cancellationToken);
+
+            if (!result.CanDelete)
+            {
+                await AuditAsync(
+                    tenantId,
+                    "INVOICE_DELETE_BLOCKED",
+                    $"/api/v1/ingest/{doctype}/{name}",
+                    StatusCodes.Status409Conflict,
+                    0,
+                    cancellationToken);
+
+                throw new InvoiceDeletionBlockedException(result.Reason ?? "Invoice deletion blocked");
+            }
+
+            if (result.RequiresAudit)
+            {
+                await AuditAsync(
+                    tenantId,
+                    "INVOICE_SOFT_DELETE",
+                    $"/api/v1/ingest/{doctype}/{name}",
+                    StatusCodes.Status202Accepted,
+                    0,
+                    cancellationToken);
+            }
+        }
+
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
@@ -215,6 +287,7 @@ public sealed class IngestionService : IIngestionService
 
             var jobStatus = new JobStatusResponse(jobId, "pending", DateTimeOffset.UtcNow, null, null);
             await _cache.SetAsync($"job:{jobId}", jobStatus, JobTtl, cancellationToken);
+            RecordIngestionJob("queued");
 
             await AuditAsync(tenantId, "DELETE", $"/api/v1/ingest/{doctype}/{name}", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
 
@@ -224,6 +297,7 @@ public sealed class IngestionService : IIngestionService
         {
             stopwatch.Stop();
             _logger.LogError(ex, "Delete failed for doctype {Doctype} name {Name}", doctype, name);
+            RecordIngestionJob("failed");
             await AuditAsync(tenantId, "DELETE", $"/api/v1/ingest/{doctype}/{name}", 500, stopwatch.ElapsedMilliseconds, cancellationToken);
             throw;
         }
@@ -266,6 +340,7 @@ public sealed class IngestionService : IIngestionService
 
             var jobStatus = new JobStatusResponse(batchJobId, "pending", DateTimeOffset.UtcNow, null, null);
             await _cache.SetAsync($"job:{batchJobId}", jobStatus, JobTtl, cancellationToken);
+            RecordIngestionJob("queued");
 
             await AuditAsync(tenantId, "POST", "/api/v1/ingest/batch", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
 
@@ -275,6 +350,7 @@ public sealed class IngestionService : IIngestionService
         {
             stopwatch.Stop();
             _logger.LogError(ex, "Batch ingestion failed");
+            RecordIngestionJob("failed");
             await AuditAsync(tenantId, "POST", "/api/v1/ingest/batch", 500, stopwatch.ElapsedMilliseconds, cancellationToken);
             throw;
         }
@@ -283,6 +359,13 @@ public sealed class IngestionService : IIngestionService
     public async Task<JobStatusResponse?> GetJobStatusAsync(string jobId, CancellationToken cancellationToken)
     {
         return await _cache.GetAsync<JobStatusResponse>($"job:{jobId}", cancellationToken);
+    }
+
+    private static void RecordIngestionJob(string status)
+    {
+        ErpHubMetrics.IngestionJobs.Add(
+            1,
+            new KeyValuePair<string, object?>("status", status));
     }
 
     private async Task PublishEventAsync(
@@ -338,6 +421,137 @@ public sealed class IngestionService : IIngestionService
         };
 
         await _repository.CreateAuditLogAsync(auditLog, cancellationToken);
+    }
+
+    private async Task ValidateInvoiceStatusChangeAsync(
+        string tenantId,
+        string doctype,
+        string name,
+        JsonElement payload,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(doctype, SalesInvoiceDoctype, StringComparison.Ordinal)
+            || !TryGetStringProperty(payload, "status", out var newStatus)
+            || !string.Equals(newStatus, CancelledStatus, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var existingInvoice = await _erpNextClient.GetAsync<JsonElement>(
+            $"{SalesInvoiceDoctype}/{Uri.EscapeDataString(name)}",
+            cancellationToken);
+        if (!existingInvoice.IsSuccessStatusCode || existingInvoice.Data is null)
+        {
+            await AuditAsync(
+                tenantId,
+                "INVOICE_STATUS_CHANGE_BLOCKED",
+                $"/api/v1/ingest/{doctype}/{name}",
+                StatusCodes.Status409Conflict,
+                0,
+                cancellationToken);
+
+            throw new InvoiceStatusChangeBlockedException("Invoice status could not be verified");
+        }
+
+        var currentStatus = ExtractStatus(existingInvoice.Data);
+        if (currentStatus is null)
+        {
+            await AuditAsync(
+                tenantId,
+                "INVOICE_STATUS_CHANGE_BLOCKED",
+                $"/api/v1/ingest/{doctype}/{name}",
+                StatusCodes.Status409Conflict,
+                0,
+                cancellationToken);
+
+            throw new InvoiceStatusChangeBlockedException("Invoice status could not be verified");
+        }
+
+        if (!string.Equals(currentStatus, IssuedStatus, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        if (!TryGetStringProperty(payload, "reason", out var reason)
+            || string.IsNullOrWhiteSpace(reason))
+        {
+            await AuditAsync(
+                tenantId,
+                "INVOICE_STATUS_CHANGE_BLOCKED",
+                $"/api/v1/ingest/{doctype}/{name}",
+                StatusCodes.Status409Conflict,
+                0,
+                cancellationToken);
+
+            throw new InvoiceStatusChangeBlockedException(
+                "Reason is required when cancelling an issued invoice");
+        }
+
+        await AuditAsync(
+            tenantId,
+            "INVOICE_STATUS_CHANGE",
+            $"/api/v1/ingest/{doctype}/{name}",
+            StatusCodes.Status202Accepted,
+            0,
+            cancellationToken);
+    }
+
+    private static bool TryGetStringProperty(JsonElement payload, string propertyName, out string? value)
+    {
+        value = null;
+        if (payload.ValueKind != JsonValueKind.Object
+            || !payload.TryGetProperty(propertyName, out var property)
+            || property.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        value = property.GetString();
+        return true;
+    }
+
+    private static string? ExtractStatus(JsonElement invoice)
+    {
+        if (invoice.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (invoice.TryGetProperty("status", out var status)
+            && status.ValueKind == JsonValueKind.String)
+        {
+            return status.GetString();
+        }
+
+        if (invoice.TryGetProperty("data", out var data)
+            && data.ValueKind == JsonValueKind.Object
+            && data.TryGetProperty("status", out var nestedStatus)
+            && nestedStatus.ValueKind == JsonValueKind.String)
+        {
+            return nestedStatus.GetString();
+        }
+
+        return null;
+    }
+
+    private bool GetForceDelete()
+    {
+        var forceValue = _httpContextAccessor.HttpContext?.Request.Query["force"].FirstOrDefault();
+        return bool.TryParse(forceValue, out var force) && force;
+    }
+
+    private string GetUserRole()
+    {
+        var user = _httpContextAccessor.HttpContext?.User;
+        if (user?.IsInRole("admin") == true)
+        {
+            return "admin";
+        }
+
+        return user?.FindFirst(ClaimTypes.Role)?.Value
+            ?? user?.FindFirst("role")?.Value
+            ?? user?.FindFirst("roles")?.Value
+            ?? string.Empty;
     }
 
     private string GetTenantId()

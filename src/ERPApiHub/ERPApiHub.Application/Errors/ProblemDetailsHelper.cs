@@ -77,6 +77,19 @@ public static class ProblemDetailsHelper
         RequestId = requestId
     };
 
+    public static ErpHubProblemDetails InvoiceBlocked(
+        string reason,
+        string? instance = null,
+        string? requestId = null) => new()
+    {
+        Type = $"{BaseUri}/invoice-blocked",
+        Title = "Invoice Operation Blocked",
+        Status = (int)HttpStatusCode.Conflict,
+        Detail = reason,
+        Instance = instance,
+        RequestId = requestId
+    };
+
     public static ErpHubProblemDetails RateLimited(
         string detail,
         int retryAfter,

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Application.Observability;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
@@ -12,6 +13,8 @@ public interface IRedisCacheService
 
     Task SetAsync<T>(string key, T value, TimeSpan? ttl = null, CancellationToken cancellationToken = default);
 
+    Task<bool> TrySetAsync<T>(string key, T value, TimeSpan? ttl = null, CancellationToken cancellationToken = default);
+
     Task RemoveAsync(string key, CancellationToken cancellationToken = default);
 
     Task<T> GetOrCreateAsync<T>(
@@ -19,6 +22,8 @@ public interface IRedisCacheService
         Func<CancellationToken, Task<T>> factory,
         TimeSpan? ttl = null,
         CancellationToken cancellationToken = default);
+
+    Task<bool> PingAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class RedisCacheService : IRedisCacheService, ICacheService
@@ -38,12 +43,34 @@ public sealed class RedisCacheService : IRedisCacheService, ICacheService
 
     public async Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default)
     {
+        return await GetCoreAsync<T>(key, recordMetrics: true, cancellationToken);
+    }
+
+    private async Task<T?> GetCoreAsync<T>(
+        string key,
+        bool recordMetrics,
+        CancellationToken cancellationToken = default)
+    {
         cancellationToken.ThrowIfCancellationRequested();
 
         var value = await _database.StringGetAsync(BuildKey(key));
         if (value.IsNullOrEmpty)
         {
+            if (recordMetrics)
+            {
+                ErpHubMetrics.CacheMisses.Add(
+                    1,
+                    new KeyValuePair<string, object?>("cache_level", "redis"));
+            }
+
             return default;
+        }
+
+        if (recordMetrics)
+        {
+            ErpHubMetrics.CacheHits.Add(
+                1,
+                new KeyValuePair<string, object?>("cache_level", "redis"));
         }
 
         return JsonSerializer.Deserialize<T>(value!, SerializerOptions);
@@ -55,6 +82,18 @@ public sealed class RedisCacheService : IRedisCacheService, ICacheService
 
         var serializedValue = JsonSerializer.Serialize(value, SerializerOptions);
         await _database.StringSetAsync(BuildKey(key), serializedValue, ttl ?? _options.DefaultTtl);
+    }
+
+    public async Task<bool> TrySetAsync<T>(string key, T value, TimeSpan? ttl = null, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var serializedValue = JsonSerializer.Serialize(value, SerializerOptions);
+        return await _database.StringSetAsync(
+            BuildKey(key),
+            serializedValue,
+            ttl ?? _options.DefaultTtl,
+            When.NotExists);
     }
 
     public async Task RemoveAsync(string key, CancellationToken cancellationToken = default)
@@ -85,6 +124,14 @@ public sealed class RedisCacheService : IRedisCacheService, ICacheService
         await _database.KeyExpireAsync(BuildKey(key), expiration);
     }
 
+    public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var latency = await _database.PingAsync();
+        return latency >= TimeSpan.Zero;
+    }
+
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _keyLocks = new();
 
     public async Task<T> GetOrCreateAsync<T>(
@@ -93,7 +140,7 @@ public sealed class RedisCacheService : IRedisCacheService, ICacheService
         TimeSpan? ttl = null,
         CancellationToken cancellationToken = default)
     {
-        var cachedValue = await GetAsync<T>(key, cancellationToken);
+        var cachedValue = await GetCoreAsync<T>(key, recordMetrics: true, cancellationToken);
         if (cachedValue is not null)
         {
             return cachedValue;
@@ -105,7 +152,7 @@ public sealed class RedisCacheService : IRedisCacheService, ICacheService
         try
         {
             // Double-check after acquiring lock
-            cachedValue = await GetAsync<T>(key, cancellationToken);
+            cachedValue = await GetCoreAsync<T>(key, recordMetrics: false, cancellationToken);
             if (cachedValue is not null)
             {
                 return cachedValue;

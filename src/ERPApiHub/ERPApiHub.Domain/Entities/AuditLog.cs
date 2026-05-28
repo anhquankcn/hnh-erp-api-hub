@@ -18,6 +18,8 @@ public sealed class AuditLog
     public IPAddress? ClientIp { get; set; }
     public string? UserAgent { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    public string? ArchiveStatus { get; set; }
+    public DateTimeOffset? ArchiveClaimedAt { get; set; }
 
     public ExternalSystem? ExternalSystem { get; set; }
 }

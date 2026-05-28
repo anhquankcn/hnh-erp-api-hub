@@ -58,6 +58,16 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task<TenantRegistry> CreateTenantRegistryAsync(TenantRegistry tenant, CancellationToken cancellationToken = default)
+    {
+        dbContext.TenantRegistries.Add(tenant);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return tenant;
+    }
+
+    public async Task<IReadOnlyList<TenantRegistry>> ListTenantRegistriesAsync(CancellationToken cancellationToken = default) =>
+        await dbContext.TenantRegistries.OrderBy(x => x.SiteName).ToListAsync(cancellationToken);
+
     public async Task<ApiKeyMapping?> GetApiKeyMappingAsync(string systemId, CancellationToken cancellationToken = default) =>
         await dbContext.ApiKeyMappings.FirstOrDefaultAsync(x => x.SystemId == systemId && x.IsActive, cancellationToken);
 
@@ -183,6 +193,59 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
     public async Task CreateProcessedEventAsync(ErpProcessedEvent evt, CancellationToken cancellationToken = default)
     {
         dbContext.ErpProcessedEvents.Add(evt);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<AuditLog>> GetAuditLogsOlderThanAsync(DateTimeOffset cutoff, int limit, CancellationToken cancellationToken = default) =>
+        await dbContext.AuditLogs
+            .Where(x => x.CreatedAt < cutoff && x.ArchiveStatus == null)
+            .OrderBy(x => x.CreatedAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+    public async Task MarkAuditLogsArchivingAsync(IReadOnlyList<string> ids, DateTimeOffset claimedAt, CancellationToken cancellationToken = default)
+    {
+        var logs = await dbContext.AuditLogs
+            .Where(x => ids.Contains(x.LogId) && x.ArchiveStatus == null)
+            .ToListAsync(cancellationToken);
+
+        foreach (var log in logs)
+        {
+            log.ArchiveStatus = "archiving";
+            log.ArchiveClaimedAt = claimedAt;
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task ClearAuditLogsArchivingAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default)
+    {
+        var logs = await dbContext.AuditLogs
+            .Where(x => ids.Contains(x.LogId) && x.ArchiveStatus == "archiving")
+            .ToListAsync(cancellationToken);
+
+        foreach (var log in logs)
+        {
+            log.ArchiveStatus = null;
+            log.ArchiveClaimedAt = null;
+        }
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task<int> CountAuditLogsAsync(CancellationToken cancellationToken = default) =>
+        await dbContext.AuditLogs.CountAsync(cancellationToken);
+
+    public async Task<int> CountAuditLogsOlderThanAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default) =>
+        await dbContext.AuditLogs.CountAsync(x => x.CreatedAt < cutoff && x.ArchiveStatus == null, cancellationToken);
+
+    public async Task DeleteAuditLogsAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default)
+    {
+        var logs = await dbContext.AuditLogs
+            .Where(x => ids.Contains(x.LogId))
+            .ToListAsync(cancellationToken);
+
+        dbContext.AuditLogs.RemoveRange(logs);
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 

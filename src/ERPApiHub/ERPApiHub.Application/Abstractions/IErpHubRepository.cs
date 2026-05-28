@@ -15,6 +15,8 @@ public interface IErpHubRepository
     // Tenant Registry
     Task<TenantRegistry?> GetTenantRegistryAsync(string tenantId, CancellationToken cancellationToken = default);
     Task<TenantRegistry?> GetTenantRegistryByBranchIdAsync(string branchId, CancellationToken cancellationToken = default);
+    Task<TenantRegistry> CreateTenantRegistryAsync(TenantRegistry tenant, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<TenantRegistry>> ListTenantRegistriesAsync(CancellationToken cancellationToken = default);
     Task UpdateTenantHealthAsync(string tenantId, string healthStatus, CancellationToken cancellationToken = default);
 
     // API Key Mappings
@@ -33,6 +35,12 @@ public interface IErpHubRepository
         int page = 1,
         int pageSize = 50,
         CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<AuditLog>> GetAuditLogsOlderThanAsync(DateTimeOffset cutoff, int limit, CancellationToken cancellationToken = default);
+    Task MarkAuditLogsArchivingAsync(IReadOnlyList<string> ids, DateTimeOffset claimedAt, CancellationToken cancellationToken = default);
+    Task ClearAuditLogsArchivingAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default);
+    Task<int> CountAuditLogsAsync(CancellationToken cancellationToken = default);
+    Task<int> CountAuditLogsOlderThanAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default);
+    Task DeleteAuditLogsAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default);
 
     // Webhooks
     Task<WebhookSubscription?> GetWebhookSubscriptionAsync(string id, CancellationToken cancellationToken = default);
