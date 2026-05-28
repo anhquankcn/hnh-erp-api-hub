@@ -1,8 +1,10 @@
 using System.Text.Json;
+using ERPApiHub.Application.Polling;
 using ERPApiHub.Infrastructure;
 using ERPApiHub.Infrastructure.Data;
 using ERPApiHub.Infrastructure.Health;
 using ERPApiHub.Worker.Consumers;
+using ERPApiHub.Worker.Workers;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
@@ -10,7 +12,10 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.WebHost.UseUrls("http://0.0.0.0:8009");
 builder.Services.AddErpHubInfrastructure(builder.Configuration);
+builder.Services.Configure<PollingOptions>(builder.Configuration.GetSection(PollingOptions.SectionName));
+builder.Services.AddSingleton<DoctypePollingRegistry>();
 builder.Services.AddHostedService<ErpIngestionConsumer>();
+builder.Services.AddHostedService<PollingWorker>();
 builder.Services
     .AddHealthChecks()
     .AddDbContextCheck<ErpHubDbContext>("postgres", tags: ["ready", "startup"])

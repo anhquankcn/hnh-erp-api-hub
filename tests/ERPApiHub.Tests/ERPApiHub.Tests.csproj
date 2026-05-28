@@ -15,5 +15,6 @@
     <ProjectReference Include="..\..\src\ERPApiHub\ERPApiHub.API\ERPApiHub.API.csproj" />
     <ProjectReference Include="..\..\src\ERPApiHub\ERPApiHub.Domain\ERPApiHub.Domain.csproj" />
     <ProjectReference Include="..\..\src\ERPApiHub\ERPApiHub.Infrastructure\ERPApiHub.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\ERPApiHub\ERPApiHub.Worker\ERPApiHub.Worker.csproj" />
   </ItemGroup>
 </Project>
