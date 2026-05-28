@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Exceptions;
+using ERPApiHub.Application.Observability;
 using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
 using Microsoft.AspNetCore.Http;
@@ -134,6 +135,7 @@ public sealed class IngestionService : IIngestionService
             // Store job status in Redis
             var jobStatus = new JobStatusResponse(jobId, "pending", DateTimeOffset.UtcNow, null, null);
             await _cache.SetAsync($"job:{jobId}", jobStatus, JobTtl, cancellationToken);
+            RecordIngestionJob("queued");
 
             // Audit log
             await AuditAsync(tenantId, "POST", $"/api/v1/ingest/{doctype}", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
@@ -152,6 +154,7 @@ public sealed class IngestionService : IIngestionService
         {
             stopwatch.Stop();
             _logger.LogError(ex, "Ingestion failed for doctype {Doctype}", doctype);
+            RecordIngestionJob("failed");
             await AuditAsync(tenantId, "POST", $"/api/v1/ingest/{doctype}", 500, stopwatch.ElapsedMilliseconds, cancellationToken);
             throw;
         }
@@ -189,6 +192,7 @@ public sealed class IngestionService : IIngestionService
 
             var jobStatus = new JobStatusResponse(jobId, "pending", DateTimeOffset.UtcNow, null, null);
             await _cache.SetAsync($"job:{jobId}", jobStatus, JobTtl, cancellationToken);
+            RecordIngestionJob("queued");
 
             await AuditAsync(tenantId, "PUT", $"/api/v1/ingest/{doctype}/{name}", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
 
@@ -198,6 +202,7 @@ public sealed class IngestionService : IIngestionService
         {
             stopwatch.Stop();
             _logger.LogError(ex, "Update failed for doctype {Doctype} name {Name}", doctype, name);
+            RecordIngestionJob("failed");
             await AuditAsync(tenantId, "PUT", $"/api/v1/ingest/{doctype}/{name}", 500, stopwatch.ElapsedMilliseconds, cancellationToken);
             throw;
         }
@@ -266,6 +271,7 @@ public sealed class IngestionService : IIngestionService
 
             var jobStatus = new JobStatusResponse(jobId, "pending", DateTimeOffset.UtcNow, null, null);
             await _cache.SetAsync($"job:{jobId}", jobStatus, JobTtl, cancellationToken);
+            RecordIngestionJob("queued");
 
             await AuditAsync(tenantId, "DELETE", $"/api/v1/ingest/{doctype}/{name}", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
 
@@ -275,6 +281,7 @@ public sealed class IngestionService : IIngestionService
         {
             stopwatch.Stop();
             _logger.LogError(ex, "Delete failed for doctype {Doctype} name {Name}", doctype, name);
+            RecordIngestionJob("failed");
             await AuditAsync(tenantId, "DELETE", $"/api/v1/ingest/{doctype}/{name}", 500, stopwatch.ElapsedMilliseconds, cancellationToken);
             throw;
         }
@@ -317,6 +324,7 @@ public sealed class IngestionService : IIngestionService
 
             var jobStatus = new JobStatusResponse(batchJobId, "pending", DateTimeOffset.UtcNow, null, null);
             await _cache.SetAsync($"job:{batchJobId}", jobStatus, JobTtl, cancellationToken);
+            RecordIngestionJob("queued");
 
             await AuditAsync(tenantId, "POST", "/api/v1/ingest/batch", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
 
@@ -326,6 +334,7 @@ public sealed class IngestionService : IIngestionService
         {
             stopwatch.Stop();
             _logger.LogError(ex, "Batch ingestion failed");
+            RecordIngestionJob("failed");
             await AuditAsync(tenantId, "POST", "/api/v1/ingest/batch", 500, stopwatch.ElapsedMilliseconds, cancellationToken);
             throw;
         }
@@ -334,6 +343,13 @@ public sealed class IngestionService : IIngestionService
     public async Task<JobStatusResponse?> GetJobStatusAsync(string jobId, CancellationToken cancellationToken)
     {
         return await _cache.GetAsync<JobStatusResponse>($"job:{jobId}", cancellationToken);
+    }
+
+    private static void RecordIngestionJob(string status)
+    {
+        ErpHubMetrics.IngestionJobs.Add(
+            1,
+            new KeyValuePair<string, object?>("status", status));
     }
 
     private async Task PublishEventAsync(

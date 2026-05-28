@@ -12,6 +12,7 @@ using ERPApiHub.Application.Observability;
 using ERPApiHub.Application.Query;
 using ERPApiHub.Application.RateLimiting;
 using ERPApiHub.Application.Webhooks;
+using ERPApiHub.API.Middleware;
 using ERPApiHub.Infrastructure;
 using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
@@ -26,6 +27,7 @@ using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using ApplicationCacheService = ERPApiHub.Application.Abstractions.ICacheService;
+using OpenTelemetry.Metrics;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -55,6 +57,13 @@ builder.Services.AddCors(options =>
 });
 builder.Services.AddErpHubInfrastructure(builder.Configuration);
 builder.Services.AddKeycloakJwtAuthentication(builder.Configuration, builder.Environment);
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics =>
+    {
+        metrics
+            .AddMeter(ErpHubMetrics.MeterName)
+            .AddPrometheusExporter();
+    });
 
 // S4-001: Multi-level caching
 builder.Services.Configure<CacheOptions>(builder.Configuration.GetSection(CacheOptions.SectionName));
@@ -175,6 +184,9 @@ app.UseAuthentication();
 // S3-001: Rate limiting middleware (after auth so context.User is populated)
 app.UseMiddleware<RateLimitMiddleware>();
 
+// S5-007: Prometheus metrics collection
+app.UseMiddleware<MetricsMiddleware>();
+
 app.UseAuthorization();
 
 var jobOptions = app.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<JobOptions>>().Value;
@@ -226,6 +238,8 @@ app.MapPost("/api/v1/auth/verify", (VerifyTokenRequest req, ERPApiHub.Applicatio
 // Root & health
 app.MapGet("/", () => Results.Ok(new { service = "erp-api-hub", status = "running" }))
     .AllowAnonymous();
+
+app.MapPrometheusScrapingEndpoint("/metrics").AllowAnonymous();
 
 // S5-005: Version Discovery
 app.MapGet("/versions", () => Results.Ok(new
