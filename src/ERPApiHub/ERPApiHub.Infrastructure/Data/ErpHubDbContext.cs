@@ -16,6 +16,8 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options, I
     public DbSet<WebhookSubscription> WebhookSubscriptions => Set<WebhookSubscription>();
     public DbSet<WebhookDelivery> WebhookDeliveries => Set<WebhookDelivery>();
     public DbSet<ErpProcessedEvent> ErpProcessedEvents => Set<ErpProcessedEvent>();
+    public DbSet<ConsentRecord> ConsentRecords => Set<ConsentRecord>();
+    public DbSet<ErasureRequest> ErasureRequests => Set<ErasureRequest>();
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
     {
@@ -39,6 +41,8 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options, I
         ConfigureWebhookSubscriptions(modelBuilder);
         ConfigureWebhookDeliveries(modelBuilder);
         ConfigureProcessedEvents(modelBuilder);
+        ConfigureConsentRecords(modelBuilder);
+        ConfigureErasureRequests(modelBuilder);
         SeedBootstrapData(modelBuilder);
     }
 
@@ -292,5 +296,31 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options, I
                     entry.Entity.UpdatedBy = userId;
             }
         }
+    private static void ConfigureConsentRecords(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<ConsentRecord>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.TenantId).IsRequired();
+            entity.Property(e => e.DataSubjectId).IsRequired();
+            entity.Property(e => e.Purpose).IsRequired();
+            entity.Property(e => e.GrantedAt).IsRequired();
+            entity.HasIndex(e => new { e.TenantId, e.DataSubjectId, e.Purpose })
+                .IsUnique()
+                .HasFilter("\"IsActive\" = true");
+        });
+    }
+
+    private static void ConfigureErasureRequests(ModelBuilder modelBuilder)
+    {
+        modelBuilder.Entity<ErasureRequest>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.TenantId).IsRequired();
+            entity.Property(e => e.DataSubjectId).IsRequired();
+            entity.Property(e => e.Status).IsRequired();
+            entity.HasIndex(e => new { e.TenantId, e.DataSubjectId });
+            entity.HasIndex(e => e.Status);
+        });
     }
 }

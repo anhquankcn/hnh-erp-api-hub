@@ -1,5 +1,4 @@
 using ERPApiHub.API.DTOs.PDPA;
-using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Compliance;
 using ERPApiHub.Application.Errors;
 using Microsoft.AspNetCore.Authorization;
@@ -8,24 +7,18 @@ using Microsoft.AspNetCore.Mvc;
 namespace ERPApiHub.API.Controllers.PDPA;
 
 /// <summary>
-/// PDPA consent endpoints.
+/// PDPA consent endpoints with durable database persistence.
 /// </summary>
 [ApiController]
 [Route("api/v2")]
 [Authorize]
-public sealed class ConsentController(
-    ConsentService consentService,
-    ICacheService cacheService) : ControllerBase
+public sealed class ConsentController(PdpaService pdpaService) : ControllerBase
 {
-    private static readonly TimeSpan ConsentTtl = TimeSpan.FromDays(365);
     private static readonly TimeSpan RateLimitWindow = TimeSpan.FromMinutes(1);
 
     /// <summary>
     /// Submit consent for a data subject.
     /// </summary>
-    /// <param name="request">Consent request payload.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The created consent record.</returns>
     [HttpPost("consent")]
     [ProducesResponseType(typeof(ConsentResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status400BadRequest)]
@@ -37,151 +30,123 @@ public sealed class ConsentController(
         [FromBody] CreateConsentRequest request,
         CancellationToken cancellationToken)
     {
-        if (await IsRateLimitedAsync("consent", request.SubjectId, 10, cancellationToken))
-        {
-            return RateLimited("Consent submission rate limit exceeded.");
-        }
-
         var tenantId = GetTenantId();
-        var response = new ConsentResponse
-        {
-            Id = Guid.NewGuid().ToString("N"),
-            SubjectId = request.SubjectId,
-            Purpose = request.Purpose,
-            Doctypes = request.Doctypes,
-            Status = "granted",
-            GrantedAt = DateTimeOffset.UtcNow,
-            ExpiryDate = request.ExpiryDate,
-            Notes = request.Notes
-        };
 
-        await cacheService.SetAsync(ConsentKey(tenantId, response.Id), response, ConsentTtl, cancellationToken);
-        await cacheService.SetAsync(SubjectConsentKey(tenantId, response.SubjectId), response, ConsentTtl, cancellationToken);
+        var consent = await pdpaService.GrantConsentAsync(
+            tenantId,
+            request.SubjectId,
+            request.Purpose,
+            request.Doctypes ?? [],
+            request.Notes,
+            request.ExpiryDate,
+            cancellationToken);
 
-        return Created($"/api/v2/consent/{response.Id}", response);
+        var response = MapToResponse(consent);
+        return Created($"/api/v2/consent/{consent.Id}", response);
     }
 
     /// <summary>
-    /// Withdraw consent by consent identifier.
+    /// Withdraw consent by purpose.
     /// </summary>
-    /// <param name="id">Consent identifier.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The withdrawn consent record.</returns>
-    [HttpPost("consent/{id}/withdraw")]
+    [HttpPost("consent/{purpose}/withdraw")]
     [ProducesResponseType(typeof(ConsentResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status404NotFound)]
     [Authorize(Policy = "api-hub:write")]
     public async Task<ActionResult<ConsentResponse>> WithdrawConsent(
-        [FromRoute] string id,
+        [FromRoute] string purpose,
+        [FromBody] WithdrawConsentRequest request,
         CancellationToken cancellationToken)
     {
         var tenantId = GetTenantId();
-        var existing = await cacheService.GetAsync<ConsentResponse>(ConsentKey(tenantId, id), cancellationToken);
-        if (existing is null)
-        {
-            return NotFound(ProblemDetailsHelper.NotFound(
-                $"Consent {id} was not found.",
-                HttpContext.Request.Path.ToString(),
-                HttpContext.TraceIdentifier));
-        }
 
-        await consentService.WithdrawConsentAsync(
+        var consent = await pdpaService.WithdrawConsentAsync(
             tenantId,
-            existing.Purpose,
-            existing.SubjectId,
-            cancellationToken: cancellationToken);
+            request.SubjectId,
+            purpose,
+            request.Reason,
+            cancellationToken);
 
-        var response = existing with
-        {
-            Status = "withdrawn",
-            WithdrawnAt = DateTimeOffset.UtcNow
-        };
-
-        await cacheService.SetAsync(ConsentKey(tenantId, id), response, ConsentTtl, cancellationToken);
-        await cacheService.SetAsync(SubjectConsentKey(tenantId, response.SubjectId), response, ConsentTtl, cancellationToken);
-
-        return Ok(response);
+        return Ok(MapToResponse(consent));
     }
 
     /// <summary>
-    /// Check consent status for a data subject.
+    /// Get consent status for a data subject.
     /// </summary>
-    /// <param name="subjectId">Data subject identifier.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>The data subject consent status.</returns>
-    [HttpGet("consent/status/{subjectId}")]
-    [Authorize(Policy = "api-hub:read")]
+    [HttpGet("consent/{subjectId}/status")]
     [ProducesResponseType(typeof(ConsentStatusResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status403Forbidden)]
+    [Authorize(Policy = "api-hub:read")]
     public async Task<ActionResult<ConsentStatusResponse>> GetConsentStatus(
         [FromRoute] string subjectId,
-        CancellationToken cancellationToken)
+        [FromQuery] string? purpose = null,
+        CancellationToken cancellationToken = default)
     {
         var tenantId = GetTenantId();
-        var consent = await cacheService.GetAsync<ConsentResponse>(
-            SubjectConsentKey(tenantId, subjectId),
-            cancellationToken);
 
-        IReadOnlyList<ConsentResponse> consents = consent is null
-            ? Array.Empty<ConsentResponse>()
-            : [consent];
-        var now = DateTimeOffset.UtcNow;
+        var consents = await pdpaService.GetConsentsBySubjectAsync(tenantId, subjectId, cancellationToken);
+        var activeConsents = consents.Where(c => c.IsActive).ToList();
 
         return Ok(new ConsentStatusResponse
         {
             SubjectId = subjectId,
-            HasActiveConsent = consents.Any(c =>
-                c.Status.Equals("granted", StringComparison.OrdinalIgnoreCase) &&
-                (c.ExpiryDate is null || c.ExpiryDate > now)),
-            Consents = consents
+            HasActiveConsent = activeConsents.Count > 0,
+            Purposes = activeConsents.Select(c => c.Purpose).ToList(),
+            LastGrantedAt = activeConsents.MaxBy(c => c.GrantedAt)?.GrantedAt,
+            Count = activeConsents.Count
         });
     }
 
-    private async Task<bool> IsRateLimitedAsync(
-        string endpoint,
-        string subjectId,
-        int limit,
+    /// <summary>
+    /// Get detailed consent record.
+    /// </summary>
+    [HttpGet("consent/{subjectId}/{purpose}")]
+    [ProducesResponseType(typeof(ConsentResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status404NotFound)]
+    [Authorize(Policy = "api-hub:read")]
+    public async Task<ActionResult<ConsentResponse>> GetConsent(
+        [FromRoute] string subjectId,
+        [FromRoute] string purpose,
         CancellationToken cancellationToken)
     {
-        var window = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
-        var count = await cacheService.IncrementAsync(
-            $"pdpa:ratelimit:{endpoint}:{NormalizeKeyPart(subjectId)}:{window}",
-            cancellationToken);
+        var tenantId = GetTenantId();
+        var consent = await pdpaService.GetConsentAsync(tenantId, subjectId, purpose, cancellationToken);
 
-        if (count == 1)
+        if (consent is null)
         {
-            await cacheService.ExpireAsync(
-                $"pdpa:ratelimit:{endpoint}:{NormalizeKeyPart(subjectId)}:{window}",
-                RateLimitWindow,
-                cancellationToken);
+            return NotFound(new ErpHubProblemDetails
+            {
+                Status = StatusCodes.Status404NotFound,
+                Title = "Consent not found",
+                Detail = $"No consent found for subject {subjectId} and purpose {purpose}"
+            });
         }
 
-        return count > limit;
+        return Ok(MapToResponse(consent));
     }
 
-    private ActionResult<ConsentResponse> RateLimited(string detail)
+    private static ConsentResponse MapToResponse(ConsentRecord consent)
     {
-        Response.Headers["Retry-After"] = ((int)RateLimitWindow.TotalSeconds).ToString();
-        return StatusCode(
-            StatusCodes.Status429TooManyRequests,
-            ProblemDetailsHelper.RateLimited(
-                detail,
-                (int)RateLimitWindow.TotalSeconds,
-                HttpContext.Request.Path.ToString(),
-                HttpContext.TraceIdentifier));
+        return new ConsentResponse
+        {
+            Id = consent.Id.ToString("N"),
+            SubjectId = consent.DataSubjectId,
+            Purpose = consent.Purpose,
+            Doctypes = consent.Doctypes,
+            Status = consent.IsActive ? "granted" : "withdrawn",
+            GrantedAt = consent.GrantedAt,
+            ExpiryDate = consent.ExpiresAt,
+            WithdrawnAt = consent.WithdrawnAt,
+            Notes = consent.Notes
+        };
     }
 
-    private string GetTenantId() => User.FindFirst("BranchId")?.Value ?? "unknown";
-
-    private static string ConsentKey(string tenantId, string id) =>
-        $"pdpa:consent:{NormalizeKeyPart(tenantId)}:{NormalizeKeyPart(id)}";
-
-    private static string SubjectConsentKey(string tenantId, string subjectId) =>
-        $"pdpa:consent-subject:{NormalizeKeyPart(tenantId)}:{NormalizeKeyPart(subjectId)}";
-
-    private static string NormalizeKeyPart(string value) =>
-        Uri.EscapeDataString(value.Trim().ToLowerInvariant());
+    private string GetTenantId()
+    {
+        return User.FindFirst("BranchId")?.Value
+            ?? User.FindFirst("tenant_id")?.Value
+            ?? throw new InvalidOperationException("Tenant identifier not found in claims.");
+    }
 }

@@ -30,7 +30,15 @@ public interface IErpHubRepository
     Task<IReadOnlyList<FieldMapping>> GetFieldMappingsAsync(string systemId, CancellationToken cancellationToken = default);
 
     // Audit Logs
-    Task<AuditLog> CreateAuditLogAsync(AuditLog log, CancellationToken cancellationToken = default);
+    // PDPA Compliance
+    Task<ConsentRecord> GetConsentAsync(string tenantId, string dataSubjectId, string purpose, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ConsentRecord>> GetConsentsBySubjectAsync(string tenantId, string dataSubjectId, CancellationToken cancellationToken = default);
+    Task<ConsentRecord> CreateConsentAsync(ConsentRecord consent, CancellationToken cancellationToken = default);
+    Task<ConsentRecord> UpdateConsentAsync(ConsentRecord consent, CancellationToken cancellationToken = default);
+    Task<ErasureRequest> GetErasureRequestAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ErasureRequest>> GetErasureRequestsBySubjectAsync(string tenantId, string dataSubjectId, CancellationToken cancellationToken = default);
+    Task<ErasureRequest> CreateErasureRequestAsync(ErasureRequest request, CancellationToken cancellationToken = default);
+    Task<ErasureRequest> UpdateErasureRequestAsync(ErasureRequest request, CancellationToken cancellationToken = default);
     Task<(IReadOnlyList<AuditLog> Items, int Total)> GetAuditLogsAsync(
         string? tenantId = null,
         string? action = null,

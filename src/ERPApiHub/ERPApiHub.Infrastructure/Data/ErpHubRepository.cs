@@ -339,4 +339,65 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
 
     private static string NormalizeAuditStatus(string status) =>
         status.Trim().ToLowerInvariant();
+
+    // PDPA Compliance Methods
+    public async Task<ConsentRecord?> GetConsentAsync(string tenantId, string dataSubjectId, string purpose, CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.ConsentRecords
+            .AsNoTracking()
+            .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.DataSubjectId == dataSubjectId && c.Purpose == purpose && c.IsActive, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<ConsentRecord>> GetConsentsBySubjectAsync(string tenantId, string dataSubjectId, CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.ConsentRecords
+            .AsNoTracking()
+            .Where(c => c.TenantId == tenantId && c.DataSubjectId == dataSubjectId)
+            .OrderByDescending(c => c.CreatedAt)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<ConsentRecord> CreateConsentAsync(ConsentRecord consent, CancellationToken cancellationToken = default)
+    {
+        _dbContext.ConsentRecords.Add(consent);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        return consent;
+    }
+
+    public async Task<ConsentRecord> UpdateConsentAsync(ConsentRecord consent, CancellationToken cancellationToken = default)
+    {
+        _dbContext.ConsentRecords.Update(consent);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        return consent;
+    }
+
+    public async Task<ErasureRequest?> GetErasureRequestAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.ErasureRequests
+            .AsNoTracking()
+            .FirstOrDefaultAsync(e => e.Id == id, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<ErasureRequest>> GetErasureRequestsBySubjectAsync(string tenantId, string dataSubjectId, CancellationToken cancellationToken = default)
+    {
+        return await _dbContext.ErasureRequests
+            .AsNoTracking()
+            .Where(e => e.TenantId == tenantId && e.DataSubjectId == dataSubjectId)
+            .OrderByDescending(e => e.RequestedAt)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<ErasureRequest> CreateErasureRequestAsync(ErasureRequest request, CancellationToken cancellationToken = default)
+    {
+        _dbContext.ErasureRequests.Add(request);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        return request;
+    }
+
+    public async Task<ErasureRequest> UpdateErasureRequestAsync(ErasureRequest request, CancellationToken cancellationToken = default)
+    {
+        _dbContext.ErasureRequests.Update(request);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+        return request;
+    }
 }

@@ -113,6 +113,7 @@ builder.Services.AddScoped<LinkFieldValidator>();
 
 // S6-002: PDPA REST endpoints
 builder.Services.AddScoped<ConsentService>();
+builder.Services.AddScoped<PdpaService>();
 
 // S4-002: Token Lifecycle
 builder.Services.AddScoped<ERPApiHub.Application.Auth.TokenService>();
