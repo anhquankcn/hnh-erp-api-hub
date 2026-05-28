@@ -250,9 +250,10 @@ public sealed class TokenService
             tokens.Add(MarkExpiredIfNeeded(token));
         }
 
+        var effectiveStatus = string.IsNullOrWhiteSpace(status) ? ApiTokenStatuses.Active : status;
         var filtered = tokens
             .Where(t => string.IsNullOrWhiteSpace(systemId) || t.SystemId.Equals(systemId, StringComparison.OrdinalIgnoreCase))
-            .Where(t => string.IsNullOrWhiteSpace(status) || t.Status.Equals(status, StringComparison.OrdinalIgnoreCase))
+            .Where(t => t.Status.Equals(effectiveStatus, StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(t => t.CreatedAt)
             .ToList();
 

@@ -49,7 +49,7 @@ public sealed class PollingWorker(
         var repository = scope.ServiceProvider.GetRequiredService<IErpHubRepository>();
         var tenants = await repository.ListTenantRegistriesAsync(cancellationToken);
         var activeTenants = tenants
-            .Where(tenant => tenant.IsActive && string.Equals(tenant.HealthStatus, "active", StringComparison.OrdinalIgnoreCase))
+            .Where(tenant => tenant.IsActive && IsPollableTenantStatus(tenant.HealthStatus))
             .ToArray();
         var doctypes = registry.GetActiveDoctypes();
 
@@ -235,6 +235,10 @@ public sealed class PollingWorker(
 
     private static string BuildCursorKey(string tenantId, string doctype) =>
         $"erphub:polling:{tenantId}:{doctype}:cursor";
+
+    private static bool IsPollableTenantStatus(string healthStatus) =>
+        string.Equals(healthStatus, "active", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(healthStatus, "healthy", StringComparison.OrdinalIgnoreCase);
 
     private static bool TryParseCursor(string? value, out DateTimeOffset cursor)
     {

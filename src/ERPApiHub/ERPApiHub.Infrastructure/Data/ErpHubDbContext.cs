@@ -52,6 +52,7 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options, I
             entity.Property(x => x.SiteName).HasColumnName("site_name").HasMaxLength(100).IsRequired();
             entity.Property(x => x.ErpNextHost).HasColumnName("erpnext_host").HasMaxLength(255).IsRequired();
             entity.Property(x => x.HealthStatus).HasColumnName("health_status").HasMaxLength(20).HasDefaultValue("active").IsRequired();
+            entity.Property(x => x.LastHealthCheck).HasColumnName("last_health_check").HasColumnType("timestamp with time zone");
             entity.Property(x => x.IsActive).HasColumnName("is_active").HasDefaultValue(true).IsRequired();
             MapAuditColumns(entity);
             entity.HasQueryFilter(x => x.DeletedAt == null);
@@ -238,6 +239,7 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options, I
             SiteName = "frontend",
             ErpNextHost = "erpnext-frontend:8080",
             HealthStatus = "active",
+            LastHealthCheck = null,
             IsActive = true,
             CreatedAt = createdAt,
             UpdatedAt = createdAt,

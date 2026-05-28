@@ -49,12 +49,17 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
     public async Task<TenantRegistry?> GetTenantRegistryByBranchIdAsync(string branchId, CancellationToken cancellationToken = default) =>
         await dbContext.TenantRegistries.FirstOrDefaultAsync(x => x.TenantId == branchId, cancellationToken);
 
-    public async Task UpdateTenantHealthAsync(string tenantId, string healthStatus, CancellationToken cancellationToken = default)
+    public async Task UpdateTenantHealthAsync(
+        string tenantId,
+        string healthStatus,
+        DateTimeOffset? lastHealthCheck = null,
+        CancellationToken cancellationToken = default)
     {
         var tenant = await dbContext.TenantRegistries.FindAsync([tenantId], cancellationToken)
             ?? throw new KeyNotFoundException($"Tenant {tenantId} not found");
 
         tenant.HealthStatus = healthStatus;
+        tenant.LastHealthCheck = lastHealthCheck ?? DateTimeOffset.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
