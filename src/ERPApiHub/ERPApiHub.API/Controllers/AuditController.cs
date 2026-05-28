@@ -1,7 +1,5 @@
 using ERPApiHub.API.DTOs.Audit;
-using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Audit;
-using ERPApiHub.Application.Errors;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -10,64 +8,80 @@ namespace ERPApiHub.API.Controllers;
 [ApiController]
 [Route("api/v2/audit")]
 [Authorize]
-public sealed class AuditController(
-    IAuditSearchService auditService,
-    ICacheService cacheService) : ControllerBase
+public sealed class AuditController(AuditSearchService service) : ControllerBase
 {
-    private static readonly TimeSpan ExportRateLimitWindow = TimeSpan.FromMinutes(1);
+    private static readonly HashSet<string> AllowedStatuses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "success",
+        "failure",
+        "warning"
+    };
+
+    private static readonly HashSet<string> AllowedExportFormats = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "csv",
+        "json"
+    };
 
     [HttpGet("search")]
-    [Authorize(Policy = "api-hub:read")]
+    [Authorize(Policy = "api-hub:admin")]
     [ProducesResponseType(typeof(AuditSearchResponse), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<AuditSearchResponse>> Search(
         [FromQuery] AuditSearchRequest request,
-        CancellationToken cancellationToken)
+        CancellationToken ct)
     {
-        var validationProblem = ValidateSearchRequest(request);
-        if (validationProblem is not null)
+        var validationError = ValidateSearchRequest(request);
+        if (validationError is not null)
         {
-            return BadRequest(validationProblem);
+            return BadRequest(new { error = validationError });
         }
 
-        var result = await auditService.SearchAsync(ToQuery(request), cancellationToken);
-        return Ok(new AuditSearchResponse
-        {
-            Items = result.Items.Select(ToDto).ToList(),
-            TotalCount = result.TotalCount,
-            PageNumber = result.PageNumber,
-            PageSize = result.PageSize,
-            TotalPages = result.TotalPages
-        });
+        var result = await service.SearchAsync(new AuditSearchQuery(
+            request.TenantId,
+            request.SystemId,
+            request.EventType,
+            request.FromDate,
+            request.ToDate,
+            request.Status,
+            request.UserId,
+            request.Endpoint,
+            request.CorrelationId,
+            request.Page,
+            request.PageSize,
+            request.SortBy ?? "createdAt",
+            request.SortDirection ?? "desc"), ct);
+
+        return Ok(MapResponse(result));
     }
 
-    [HttpPost("export")]
+    [HttpGet("export")]
     [Authorize(Policy = "api-hub:admin")]
     [Produces("text/csv", "application/json")]
     [ProducesResponseType(typeof(FileStreamResult), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status401Unauthorized)]
-    [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status403Forbidden)]
-    [ProducesResponseType(typeof(ErpHubProblemDetails), StatusCodes.Status429TooManyRequests)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> Export(
-        [FromBody] AuditExportRequest request,
-        CancellationToken cancellationToken)
+        [FromQuery] AuditExportRequest request,
+        CancellationToken ct)
     {
-        var validationProblem = ValidateExportRequest(request);
-        if (validationProblem is not null)
+        var validationError = ValidateExportRequest(request);
+        if (validationError is not null)
         {
-            return BadRequest(validationProblem);
+            return BadRequest(new { error = validationError });
         }
 
-        if (await IsExportRateLimitedAsync(cancellationToken))
-        {
-            return RateLimited("Audit export rate limit exceeded.");
-        }
+        var format = request.Format.Trim().ToLowerInvariant();
+        var stream = await service.ExportAsync(new AuditExportQuery(
+            request.TenantId,
+            request.SystemId,
+            request.EventType,
+            request.FromDate,
+            request.ToDate,
+            request.Status,
+            format,
+            request.CorrelationId,
+            request.MaxRecords), ct);
 
-        var stream = await auditService.ExportAsync(ToQuery(request), cancellationToken);
-        var format = NormalizeFormat(request.Format);
         var contentType = format == "json" ? "application/json" : "text/csv";
         var extension = format == "json" ? "json" : "csv";
         var fileName = $"audit-export-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.{extension}";
@@ -75,116 +89,115 @@ public sealed class AuditController(
         return File(stream, contentType, fileName);
     }
 
-    private ErpHubProblemDetails? ValidateSearchRequest(AuditSearchRequest request)
-    {
-        if (request.PageNumber <= 0 || request.PageSize <= 0 || request.PageSize > 500)
-        {
-            return ValidationProblem("PageNumber must be greater than 0 and PageSize must be between 1 and 500.");
-        }
-
-        return ValidateDateRange(request.FromDate, request.ToDate);
-    }
-
-    private ErpHubProblemDetails? ValidateExportRequest(AuditExportRequest request)
-    {
-        var format = NormalizeFormat(request.Format);
-        if (format is not "csv" and not "json")
-        {
-            return ValidationProblem("Format must be either 'csv' or 'json'.");
-        }
-
-        return ValidateDateRange(request.FromDate, request.ToDate);
-    }
-
-    private ErpHubProblemDetails? ValidateDateRange(DateTimeOffset? fromDate, DateTimeOffset? toDate)
+    [HttpGet("stats")]
+    [Authorize(Policy = "api-hub:admin")]
+    [ProducesResponseType(typeof(AuditStatsResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<AuditStatsResponse>> GetStats(
+        [FromQuery] DateTimeOffset? fromDate,
+        [FromQuery] DateTimeOffset? toDate,
+        CancellationToken ct)
     {
         if (fromDate is not null && toDate is not null && fromDate > toDate)
         {
-            return ValidationProblem("FromDate must be earlier than or equal to ToDate.");
+            return BadRequest(new { error = "fromDate must be before or equal to toDate." });
+        }
+
+        var stats = await service.GetStatsAsync(fromDate, toDate, ct);
+        return Ok(new AuditStatsResponse
+        {
+            TotalEvents = stats.TotalEvents,
+            SuccessCount = stats.SuccessCount,
+            FailureCount = stats.FailureCount,
+            WarningCount = stats.WarningCount,
+            EventsByType = stats.EventsByType,
+            EventsByTenant = stats.EventsByTenant,
+            EventsByDay = stats.EventsByDay
+        });
+    }
+
+    private static string? ValidateSearchRequest(AuditSearchRequest request)
+    {
+        if (request.FromDate is not null && request.ToDate is not null && request.FromDate > request.ToDate)
+        {
+            return "fromDate must be before or equal to toDate.";
+        }
+
+        if (request.Page < 1)
+        {
+            return "page must be greater than or equal to 1.";
+        }
+
+        if (request.PageSize < 1)
+        {
+            return "pageSize must be greater than or equal to 1.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Status) && !AllowedStatuses.Contains(request.Status))
+        {
+            return "status must be one of: success, failure, warning.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.SortDirection) &&
+            !request.SortDirection.Equals("asc", StringComparison.OrdinalIgnoreCase) &&
+            !request.SortDirection.Equals("desc", StringComparison.OrdinalIgnoreCase))
+        {
+            return "sortDirection must be either asc or desc.";
         }
 
         return null;
     }
 
-    private async Task<bool> IsExportRateLimitedAsync(CancellationToken cancellationToken)
+    private static string? ValidateExportRequest(AuditExportRequest request)
     {
-        var window = DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60;
-        var key = $"audit:export:ratelimit:{NormalizeKeyPart(GetUserKey())}:{window}";
-        var count = await cacheService.IncrementAsync(key, cancellationToken);
-
-        if (count == 1)
+        if (request.FromDate is not null && request.ToDate is not null && request.FromDate > request.ToDate)
         {
-            await cacheService.ExpireAsync(key, ExportRateLimitWindow, cancellationToken);
+            return "fromDate must be before or equal to toDate.";
         }
 
-        return count > 10;
+        if (!string.IsNullOrWhiteSpace(request.Status) && !AllowedStatuses.Contains(request.Status))
+        {
+            return "status must be one of: success, failure, warning.";
+        }
+
+        if (string.IsNullOrWhiteSpace(request.Format) || !AllowedExportFormats.Contains(request.Format))
+        {
+            return "format must be either csv or json.";
+        }
+
+        if (request.MaxRecords is < 1)
+        {
+            return "maxRecords must be greater than or equal to 1.";
+        }
+
+        return null;
     }
 
-    private ObjectResult RateLimited(string detail)
-    {
-        Response.Headers["Retry-After"] = ((int)ExportRateLimitWindow.TotalSeconds).ToString();
-        return StatusCode(
-            StatusCodes.Status429TooManyRequests,
-            ProblemDetailsHelper.RateLimited(
-                detail,
-                (int)ExportRateLimitWindow.TotalSeconds,
-                HttpContext.Request.Path.ToString(),
-                HttpContext.TraceIdentifier));
-    }
+    private static AuditSearchResponse MapResponse(AuditSearchResult result) =>
+        new()
+        {
+            TotalCount = result.TotalCount,
+            Page = result.Page,
+            PageSize = result.PageSize,
+            TotalPages = result.TotalPages,
+            Items = result.Items.Select(MapLog).ToList()
+        };
 
-    private ErpHubProblemDetails ValidationProblem(string detail) =>
-        ProblemDetailsHelper.Validation(
-            detail,
-            HttpContext.Request.Path.ToString(),
-            HttpContext.TraceIdentifier);
-
-    private string GetUserKey() =>
-        User.FindFirst("sub")?.Value ??
-        User.Identity?.Name ??
-        HttpContext.Connection.RemoteIpAddress?.ToString() ??
-        "unknown";
-
-    private static AuditSearchQuery ToQuery(AuditSearchRequest request) => new()
-    {
-        TenantId = request.TenantId,
-        Method = request.Method,
-        Endpoint = request.Endpoint,
-        StatusCode = request.StatusCode,
-        FromDate = request.FromDate,
-        ToDate = request.ToDate,
-        CorrelationId = request.CorrelationId,
-        PageNumber = request.PageNumber,
-        PageSize = request.PageSize
-    };
-
-    private static AuditExportQuery ToQuery(AuditExportRequest request) => new()
-    {
-        TenantId = request.TenantId,
-        Method = request.Method,
-        Endpoint = request.Endpoint,
-        StatusCode = request.StatusCode,
-        FromDate = request.FromDate,
-        ToDate = request.ToDate,
-        CorrelationId = request.CorrelationId,
-        Format = request.Format
-    };
-
-    private static AuditLogItem ToDto(AuditLogResultItem item) => new()
-    {
-        Id = item.Id,
-        TenantId = item.TenantId,
-        Method = item.Method,
-        Endpoint = item.Endpoint,
-        StatusCode = item.StatusCode,
-        DurationMs = item.DurationMs,
-        Timestamp = item.Timestamp,
-        CorrelationId = item.CorrelationId,
-        ErrorMessage = item.ErrorMessage
-    };
-
-    private static string NormalizeFormat(string? format) =>
-        string.IsNullOrWhiteSpace(format) ? "csv" : format.Trim().ToLowerInvariant();
-
-    private static string NormalizeKeyPart(string value) =>
-        Uri.EscapeDataString(value.Trim().ToLowerInvariant());
+    private static AuditLogDto MapLog(AuditLogResult item) =>
+        new()
+        {
+            Id = item.Id,
+            TenantId = item.TenantId,
+            SystemId = item.SystemId,
+            EventType = item.EventType,
+            Description = item.Description,
+            Status = item.Status,
+            UserId = item.UserId,
+            Endpoint = item.Endpoint,
+            StatusCode = item.StatusCode,
+            DurationMs = item.DurationMs,
+            CorrelationId = item.CorrelationId,
+            IpAddress = item.IpAddress,
+            CreatedAt = item.CreatedAt
+        };
 }

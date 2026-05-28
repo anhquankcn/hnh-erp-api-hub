@@ -100,12 +100,16 @@ builder.Services.AddScoped<IngestionService>();
 builder.Services.AddScoped<InvoiceDeletionGuard>();
 builder.Services.AddScoped<QueryService>();
 builder.Services.AddScoped<AuditService>();
-builder.Services.AddScoped<AuditSearchService>();
+builder.Services.AddScoped<IAuditSearchService, AuditSearchService>();
 builder.Services.AddSingleton<PiiMaskingService>();
 builder.Services.AddScoped<WebhookSignatureService>();
 builder.Services.AddScoped<WebhookSubscriptionService>();
 builder.Services.AddScoped<WebhookDeliveryService>();
 builder.Services.AddHttpClient("WebhookDelivery");
+
+builder.Services.Configure<LinkFieldValidationOptions>(
+    builder.Configuration.GetSection(LinkFieldValidationOptions.SectionName));
+builder.Services.AddScoped<LinkFieldValidator>();
 
 // S6-002: PDPA REST endpoints
 builder.Services.AddScoped<ConsentService>();
