@@ -1,13 +1,14 @@
 namespace ERPApiHub.API.DTOs.Audit;
 
-public sealed record AuditExportRequest
+public sealed class AuditExportRequest
 {
-    public string? TenantId { get; init; }
-    public string? Method { get; init; }
-    public string? Endpoint { get; init; }
-    public int? StatusCode { get; init; }
-    public DateTimeOffset? FromDate { get; init; }
-    public DateTimeOffset? ToDate { get; init; }
-    public string? CorrelationId { get; init; }
-    public string Format { get; init; } = "csv";
+    public string? TenantId { get; set; }
+    public string? SystemId { get; set; }
+    public string? EventType { get; set; }
+    public DateTimeOffset? FromDate { get; set; }
+    public DateTimeOffset? ToDate { get; set; }
+    public string? Status { get; set; }
+    public string Format { get; set; } = "csv";
+    public string? CorrelationId { get; set; }
+    public int? MaxRecords { get; set; } = 10000;
 }

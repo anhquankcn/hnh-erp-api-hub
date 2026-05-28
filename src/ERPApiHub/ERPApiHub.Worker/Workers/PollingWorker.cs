@@ -103,30 +103,52 @@ public sealed class PollingWorker(
             ? DateTimeOffset.UtcNow.Subtract(_pollingOptions.InitialCursorLookback).ToString("O")
             : cursor;
 
-        var resourcePath = BuildResourcePath(doctype, effectiveCursor);
-        var response = await erpNextClient.GetAsync<JsonElement>(resourcePath, tenantId, cancellationToken);
-
-        if (response.StatusCode == StatusCodes.Status429TooManyRequests)
-        {
-            logger.LogWarning(
-                "ERPNext rate limited polling for tenant {TenantId} doctype {Doctype}. Backing off for {BackoffSeconds}s.",
-                tenantId,
-                doctype.Doctype,
-                _pollingOptions.Backoff.RateLimitDelay.TotalSeconds);
-            return true;
-        }
-
-        if (!response.IsSuccessStatusCode || response.Data.ValueKind == JsonValueKind.Undefined)
-        {
-            throw new InvalidOperationException($"ERPNext polling query failed with status {response.StatusCode}: {response.Message}");
-        }
-
-        var changes = ParseChanges(response.Data, doctype).ToArray();
+        var allChanges = new List<PollingChange>();
         var nextCursor = TryParseCursor(effectiveCursor, out var parsedCursor)
             ? parsedCursor
             : DateTimeOffset.UtcNow.Subtract(_pollingOptions.InitialCursorLookback);
+        var pageLimit = _pollingOptions.BatchLimit;
+        int offset = 0;
 
-        foreach (var change in changes)
+        while (true)
+        {
+            var resourcePath = BuildResourcePath(doctype, effectiveCursor, pageLimit, offset);
+            var response = await erpNextClient.GetAsync<JsonElement>(resourcePath, tenantId, cancellationToken);
+
+            if (response.StatusCode == StatusCodes.Status429TooManyRequests)
+            {
+                logger.LogWarning(
+                    "ERPNext rate limited polling for tenant {TenantId} doctype {Doctype}. Backing off for {BackoffSeconds}s.",
+                    tenantId,
+                    doctype.Doctype,
+                    _pollingOptions.Backoff.RateLimitDelay.TotalSeconds);
+                return true;
+            }
+
+            if (!response.IsSuccessStatusCode || response.Data.ValueKind == JsonValueKind.Undefined)
+            {
+                throw new InvalidOperationException($"ERPNext polling query failed with status {response.StatusCode}: {response.Message}");
+            }
+
+            var pageChanges = ParseChanges(response.Data, doctype).ToArray();
+            if (pageChanges.Length == 0)
+            {
+                break;
+            }
+
+            allChanges.AddRange(pageChanges);
+
+            // Guard: If we got a full page, there might be more. Continue paginating.
+            if (pageChanges.Length < pageLimit)
+            {
+                break;
+            }
+
+            offset += pageLimit;
+        }
+
+        // Publish all changes
+        foreach (var change in allChanges)
         {
             var changeEvent = new ErpNextChangeEvent(
                 doctype.Doctype,
@@ -141,9 +163,16 @@ public sealed class PollingWorker(
             }
         }
 
-        if (changes.Length > 0)
+        // Guard: Only update cursor when we have changes. When no changes found,
+        // cursor stays the same to prevent data loss from transaction lag.
+        if (allChanges.Count > 0)
         {
-            await cache.SetAsync(cursorKey, nextCursor.ToString("O"), _pollingOptions.CursorTtl, cancellationToken);
+            // For the guard: if we paginated and got exactly pageLimit records on the last page,
+            // use the first record of the last page's timestamp as cursor to create overlap.
+            // Otherwise, use the last record's timestamp.
+            var lastPageFirstIndex = Math.Max(0, allChanges.Count - pageLimit);
+            var guardCursor = allChanges[lastPageFirstIndex].ModifiedTimestamp;
+            await cache.SetAsync(cursorKey, guardCursor.ToString("O"), _pollingOptions.CursorTtl, cancellationToken);
         }
 
         logger.LogInformation(
@@ -221,7 +250,7 @@ public sealed class PollingWorker(
         return false;
     }
 
-    private static string BuildResourcePath(DoctypePollingRegistration doctype, string cursor)
+    private static string BuildResourcePath(DoctypePollingRegistration doctype, string cursor, int limit, int offset)
     {
         var filters = JsonSerializer.Serialize(new[] { new[] { doctype.LastCursorField, ">", cursor } });
         var fields = JsonSerializer.Serialize(new[] { "name", doctype.LastCursorField });
@@ -230,7 +259,8 @@ public sealed class PollingWorker(
             + $"?filters={Uri.EscapeDataString(filters)}"
             + $"&fields={Uri.EscapeDataString(fields)}"
             + $"&order_by={Uri.EscapeDataString($"{doctype.LastCursorField} asc")}"
-            + "&limit_page_length=100";
+            + $"&limit_page_length={limit}"
+            + $"&offset={offset}";
     }
 
     private static string BuildCursorKey(string tenantId, string doctype) =>

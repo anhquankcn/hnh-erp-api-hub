@@ -1,10 +1,10 @@
 namespace ERPApiHub.API.DTOs.Audit;
 
-public sealed record AuditSearchResponse
+public sealed class AuditSearchResponse
 {
-    public IReadOnlyList<AuditLogItem> Items { get; init; } = [];
-    public int TotalCount { get; init; }
-    public int PageNumber { get; init; }
-    public int PageSize { get; init; }
-    public int TotalPages { get; init; }
+    public int TotalCount { get; set; }
+    public int Page { get; set; }
+    public int PageSize { get; set; }
+    public int TotalPages { get; set; }
+    public List<AuditLogDto> Items { get; set; } = [];
 }

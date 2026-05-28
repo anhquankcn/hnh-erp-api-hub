@@ -10,6 +10,7 @@ public sealed class PollingOptions
     public TimeSpan StandardInterval { get; set; } = TimeSpan.FromMinutes(5);
     public TimeSpan CursorTtl { get; set; } = TimeSpan.FromHours(24);
     public TimeSpan InitialCursorLookback { get; set; } = TimeSpan.FromHours(1);
+    public int BatchLimit { get; set; } = 100;
     public PollingBackoffOptions Backoff { get; set; } = new();
     public List<PollingDoctypeOptions> Doctypes { get; set; } = [];
 }
