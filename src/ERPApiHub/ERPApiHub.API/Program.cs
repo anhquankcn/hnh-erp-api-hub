@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json;
+using ERPApiHub.API.Health;
+using ERPApiHub.API.Services.Caching;
 using ERPApiHub.Application.Audit;
 using ERPApiHub.Application.Compliance;
 using ERPApiHub.Application.Configuration;
@@ -13,15 +15,16 @@ using ERPApiHub.Infrastructure;
 using ERPApiHub.Infrastructure.Caching;
 using ERPApiHub.Infrastructure.Data;
 using ERPApiHub.Infrastructure.ErpNext;
-using ERPApiHub.Infrastructure.Health;
 using ERPApiHub.Infrastructure.Security;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
+using ApplicationCacheService = ERPApiHub.Application.Abstractions.ICacheService;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.WebHost.UseUrls("http://0.0.0.0:8008");
 builder.Services.AddOpenApi();
+builder.Services.AddControllers();
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("InternalGateway", policy =>
@@ -34,6 +37,12 @@ builder.Services.AddCors(options =>
 });
 builder.Services.AddErpHubInfrastructure(builder.Configuration);
 builder.Services.AddKeycloakJwtAuthentication(builder.Configuration, builder.Environment);
+
+// S4-001: Multi-level caching
+builder.Services.Configure<CacheOptions>(builder.Configuration.GetSection(CacheOptions.SectionName));
+builder.Services.AddSingleton<CacheService>();
+builder.Services.AddSingleton<ApplicationCacheService>(sp => sp.GetRequiredService<CacheService>());
+builder.Services.AddScoped<CacheInvalidationService>();
 
 // Application layer services
 builder.Services.AddSingleton<AllowedDoctypeValidator>();
@@ -85,7 +94,9 @@ builder.Services.AddAuthorizationBuilder()
 builder.Services
     .AddHealthChecks()
     .AddDbContextCheck<ErpHubDbContext>("postgres", tags: ["ready", "startup"])
-    .AddCheck<RabbitMqHealthCheck>("rabbitmq", tags: ["ready"]);
+    .AddCheck<RedisHealthCheck>("redis-cache", tags: ["ready", "startup"])
+    .AddCheck<RabbitMqHealthCheck>("rabbitmq", tags: ["ready"])
+    .AddCheck<ErpNextHealthCheck>("erpnext", tags: ["ready"]);
 
 var app = builder.Build();
 
@@ -107,6 +118,8 @@ app.UseAuthentication();
 app.UseMiddleware<RateLimitMiddleware>();
 
 app.UseAuthorization();
+
+app.MapControllers();
 
 // ─── Auth Endpoints (S4-002) ───
 
@@ -183,13 +196,24 @@ app.MapGet("/api/v1/ingest/status/{jobId}", async (string jobId, IRedisCacheServ
     return status is null ? Results.NotFound(new { error = "Job not found" }) : Results.Ok(status);
 }).RequireAuthorization("api-hub:read");
 
-app.MapGet("/api/v1/ingest/dlq", () =>
+app.MapGet("/api/v1/ingest/dlq", async (int? page, int? pageSize, DlqManagementService dlqService, CancellationToken ct) =>
 {
-    return Results.Ok(new { message = "DLQ listing requires RabbitMQ Management API integration", items = Array.Empty<object>() });
+    var normalizedPage = Math.Max(page ?? 1, 1);
+    var normalizedPageSize = Math.Clamp(pageSize ?? 50, 1, 100);
+    var (items, total) = await dlqService.GetDeadLettersAsync(normalizedPage, normalizedPageSize, ct);
+
+    return Results.Ok(new
+    {
+        items,
+        total,
+        page = normalizedPage,
+        pageSize = normalizedPageSize
+    });
 }).RequireAuthorization("api-hub:admin");
 
-app.MapPost("/api/v1/ingest/dlq/{id}/replay", (string id) =>
+app.MapPost("/api/v1/ingest/dlq/{id}/replay", async (string id, DlqManagementService dlqService, CancellationToken ct) =>
 {
+    await dlqService.ReplayAsync(id, ct);
     return Results.Accepted(null, new { message = $"Replay requested for DLQ message {id}" });
 }).RequireAuthorization("api-hub:admin");
 
