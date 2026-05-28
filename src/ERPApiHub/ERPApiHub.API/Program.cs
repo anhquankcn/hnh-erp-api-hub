@@ -20,6 +20,8 @@ using ERPApiHub.Infrastructure.Security;
 using Hangfire;
 using Hangfire.Dashboard;
 using Hangfire.Redis.StackExchange;
+using Asp.Versioning;
+using Asp.Versioning.Builder;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -138,7 +140,21 @@ builder.Services
     .AddCheck<RabbitMqHealthCheck>("rabbitmq", tags: ["ready"])
     .AddCheck<ErpNextHealthCheck>("erpnext", tags: ["ready"]);
 
+// S5-005: API Versioning
+builder.Services.AddApiVersioning(options =>
+{
+    options.DefaultApiVersion = new ApiVersion(1, 0);
+    options.AssumeDefaultVersionWhenUnspecified = true;
+    options.ReportApiVersions = true;
+}).AddApiExplorer();
+
 var app = builder.Build();
+
+var apiVersionSet = app.NewApiVersionSet()
+    .HasApiVersion(new ApiVersion(1, 0))
+    .HasApiVersion(new ApiVersion(2, 0))
+    .ReportApiVersions()
+    .Build();
 
 if (app.Environment.IsDevelopment())
 {
@@ -210,8 +226,74 @@ app.MapPost("/api/v1/auth/verify", (VerifyTokenRequest req, ERPApiHub.Applicatio
 // Root & health
 app.MapGet("/", () => Results.Ok(new { service = "erp-api-hub", status = "running" }))
     .AllowAnonymous();
-app.MapGet("/v1/health", () => Results.Ok(new { status = "ok" }))
+
+// S5-005: Version Discovery
+app.MapGet("/versions", () => Results.Ok(new
+{
+    versions = new[] { "1.0", "2.0" },
+    deprecated = new[] { "1.0" },
+    sunsetDate = "2026-12-31T00:00:00Z"
+})).AllowAnonymous();
+
+// ─── Versioned Health Endpoints ───
+
+// v1 Health — basic (deprecated, gets Sunset header)
+app.MapGet("/api/v1/health", () => Results.Ok(new { status = "ok", version = "1.0" }))
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(1, 0)
     .AllowAnonymous();
+
+// v2 Health — enhanced with uptime
+app.MapGet("/api/v2/health", () =>
+{
+    var uptime = DateTimeOffset.UtcNow - System.Diagnostics.Process.GetCurrentProcess().StartTime;
+    return Results.Ok(new
+    {
+        status = "ok",
+        version = "2.0",
+        uptime = uptime.TotalSeconds,
+        uptimeFormatted = $"{uptime.Days}d {uptime.Hours}h {uptime.Minutes}m"
+    });
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(2, 0)
+    .AllowAnonymous();
+
+// v2 Detailed Health — full check results
+app.MapGet("/api/v2/health/detailed", async (HealthCheckService healthCheckService, CancellationToken ct) =>
+{
+    var report = await healthCheckService.CheckHealthAsync(ct);
+    return Results.Ok(new
+    {
+        status = report.Status.ToString(),
+        version = "2.0",
+        checkedAt = DateTimeOffset.UtcNow,
+        checks = report.Entries.Select(e => new
+        {
+            name = e.Key,
+            status = e.Value.Status.ToString(),
+            description = e.Value.Description,
+            duration = e.Value.Duration.TotalMilliseconds
+        })
+    });
+})
+    .WithApiVersionSet(apiVersionSet)
+    .MapToApiVersion(2, 0)
+    .AllowAnonymous();
+
+// Sunset header middleware for v1 responses
+app.Use(async (context, next) =>
+{
+    await next();
+
+    if (context.Response.StatusCode == 200 &&
+        context.GetEndpoint()?.Metadata.GetMetadata<ApiVersionAttribute>()?.Versions
+            ?.Any(v => v.MajorVersion == 1 && v.MinorVersion == 0) == true)
+    {
+        context.Response.Headers.Append("Sunset", "Sat, 31 Dec 2026 00:00:00 GMT");
+        context.Response.Headers.Append("Deprecation", "true");
+    }
+});
 
 // ─── Ingestion Endpoints (S2-001, S2-002, S2-008) ───
 
