@@ -15,8 +15,12 @@ namespace ERPApiHub.Application.Audit;
 /// </summary>
 public sealed class AuditRetentionService : BackgroundService
 {
+    private const string LastHashCacheKey = "audit:last-hash";
+    private const string LastRunCacheKey = "audit:last-run";
+
     private readonly IErpHubRepository _repository;
     private readonly IBlobStorage _blobStorage;
+    private readonly ICacheService _cache;
     private readonly IOptions<RetentionConfig> _options;
     private readonly ILogger<AuditRetentionService> _logger;
     private string? _lastHash;
@@ -24,11 +28,13 @@ public sealed class AuditRetentionService : BackgroundService
     public AuditRetentionService(
         IErpHubRepository repository,
         IBlobStorage blobStorage,
+        ICacheService cache,
         IOptions<RetentionConfig> options,
         ILogger<AuditRetentionService> logger)
     {
         _repository = repository;
         _blobStorage = blobStorage;
+        _cache = cache;
         _options = options;
         _logger = logger;
     }
@@ -37,6 +43,8 @@ public sealed class AuditRetentionService : BackgroundService
     {
         _logger.LogInformation("AuditRetentionService started. Retention: {RetentionDays} days, Mode: {Mode}",
             _options.Value.DefaultRetentionDays, _options.Value.ArchiveMode);
+
+        await RestoreLastHashAsync(stoppingToken);
 
         // Run retention check on startup
         await RunRetentionAsync(stoppingToken);
@@ -63,6 +71,11 @@ public sealed class AuditRetentionService : BackgroundService
 
     public async Task RunRetentionAsync(CancellationToken cancellationToken = default)
     {
+        if (_lastHash is null)
+        {
+            await RestoreLastHashAsync(cancellationToken);
+        }
+
         var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.Value.DefaultRetentionDays);
         _logger.LogInformation("Running audit retention for logs older than {Cutoff:O}", cutoff);
 
@@ -106,6 +119,8 @@ public sealed class AuditRetentionService : BackgroundService
             _lastHash = hash;
         }
 
+        await _cache.SetAsync(LastHashCacheKey, _lastHash, cancellationToken: cancellationToken);
+
         // Write to blob storage
         var archivePath = $"audit/{DateTimeOffset.UtcNow:yyyy/MM/dd}/archive-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json";
         var json = JsonSerializer.Serialize(archived, new JsonSerializerOptions { WriteIndented = true });
@@ -115,6 +130,8 @@ public sealed class AuditRetentionService : BackgroundService
         // Delete archived logs from DB
         await _repository.DeleteAuditLogsAsync(oldLogs.Select(l => l.LogId).ToList(), cancellationToken);
 
+        await _cache.SetAsync(LastRunCacheKey, DateTimeOffset.UtcNow, cancellationToken: cancellationToken);
+
         _logger.LogInformation("Archived {Count} logs to {Path}", archived.Count, archivePath);
     }
 
@@ -123,6 +140,7 @@ public sealed class AuditRetentionService : BackgroundService
         var totalLogs = await _repository.CountAuditLogsAsync(cancellationToken);
         var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.Value.DefaultRetentionDays);
         var oldLogsCount = await _repository.CountAuditLogsOlderThanAsync(cutoff, cancellationToken);
+        var lastRun = await _cache.GetAsync<DateTimeOffset?>(LastRunCacheKey, cancellationToken);
 
         return new RetentionStatus
         {
@@ -130,9 +148,14 @@ public sealed class AuditRetentionService : BackgroundService
             LogsPendingArchive = oldLogsCount,
             RetentionDays = _options.Value.DefaultRetentionDays,
             ArchiveMode = _options.Value.ArchiveMode,
-            LastRun = null, // Could track this in cache/db
+            LastRun = lastRun,
             HashChainEnabled = _options.Value.EnableHashChain,
         };
+    }
+
+    private async Task RestoreLastHashAsync(CancellationToken cancellationToken)
+    {
+        _lastHash = await _cache.GetAsync<string>(LastHashCacheKey, cancellationToken);
     }
 
     private string ComputeHash(AuditLog log, string? previousHash)

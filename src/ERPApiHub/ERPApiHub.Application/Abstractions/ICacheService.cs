@@ -8,4 +8,5 @@ public interface ICacheService
     Task RemoveAsync(string key, CancellationToken cancellationToken = default);
     Task<long> IncrementAsync(string key, CancellationToken cancellationToken = default);
     Task ExpireAsync(string key, TimeSpan expiration, CancellationToken cancellationToken = default);
+    Task<bool> PingAsync(CancellationToken cancellationToken = default);
 }

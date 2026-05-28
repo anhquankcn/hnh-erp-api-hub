@@ -180,9 +180,25 @@ public sealed class ConsentService
         // Simulate async processing (in production: queue to worker)
         _ = Task.Run(async () =>
         {
-            await Task.Delay(TimeSpan.FromSeconds(30));
-            await _cache.SetAsync(cacheKey, job with { Status = "completed", CompletedAt = DateTimeOffset.UtcNow, DownloadUrl = $"/internal/v1/exports/{jobId}" },
-                TimeSpan.FromDays(7), CancellationToken.None);
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30));
+                await _cache.SetAsync(cacheKey, job with { Status = "completed", CompletedAt = DateTimeOffset.UtcNow, DownloadUrl = $"/internal/v1/exports/{jobId}" },
+                    TimeSpan.FromDays(7), CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Export job {JobId} failed", jobId);
+                try
+                {
+                    await _cache.SetAsync(cacheKey, job with { Status = "failed", ErrorMessage = ex.Message },
+                        TimeSpan.FromDays(7), CancellationToken.None);
+                }
+                catch (Exception cacheEx)
+                {
+                    _logger.LogError(cacheEx, "Failed to update export job {JobId} failure status", jobId);
+                }
+            }
         });
 
         return job;

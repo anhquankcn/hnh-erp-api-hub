@@ -19,6 +19,8 @@ public interface IRedisCacheService
         Func<CancellationToken, Task<T>> factory,
         TimeSpan? ttl = null,
         CancellationToken cancellationToken = default);
+
+    Task<bool> PingAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class RedisCacheService : IRedisCacheService, ICacheService
@@ -83,6 +85,14 @@ public sealed class RedisCacheService : IRedisCacheService, ICacheService
         cancellationToken.ThrowIfCancellationRequested();
 
         await _database.KeyExpireAsync(BuildKey(key), expiration);
+    }
+
+    public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var latency = await _database.PingAsync();
+        return latency >= TimeSpan.Zero;
     }
 
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _keyLocks = new();

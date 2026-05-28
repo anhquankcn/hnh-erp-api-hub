@@ -196,6 +196,29 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 
+    public async Task<IReadOnlyList<AuditLog>> GetAuditLogsOlderThanAsync(DateTimeOffset cutoff, int limit, CancellationToken cancellationToken = default) =>
+        await dbContext.AuditLogs
+            .Where(x => x.CreatedAt < cutoff)
+            .OrderBy(x => x.CreatedAt)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+    public async Task<int> CountAuditLogsAsync(CancellationToken cancellationToken = default) =>
+        await dbContext.AuditLogs.CountAsync(cancellationToken);
+
+    public async Task<int> CountAuditLogsOlderThanAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default) =>
+        await dbContext.AuditLogs.CountAsync(x => x.CreatedAt < cutoff, cancellationToken);
+
+    public async Task DeleteAuditLogsAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default)
+    {
+        var logs = await dbContext.AuditLogs
+            .Where(x => ids.Contains(x.LogId))
+            .ToListAsync(cancellationToken);
+
+        dbContext.AuditLogs.RemoveRange(logs);
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+
     public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) =>
         dbContext.SaveChangesAsync(cancellationToken);
 }
