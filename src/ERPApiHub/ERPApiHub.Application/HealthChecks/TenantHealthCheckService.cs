@@ -56,7 +56,22 @@ public sealed class TenantHealthCheckService
         foreach (var tenant in activeTenants)
         {
             var previousStatus = tenant.HealthStatus;
-            var result = await CheckTenantHealthAsync(tenant, ct);
+            TenantHealthResult result;
+
+            try
+            {
+                result = await CheckTenantHealthAsync(tenant, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                unhealthyCount++;
+                _logger.LogError(ex, "Tenant {TenantId} health check could not be completed.", tenant.TenantId);
+                continue;
+            }
 
             switch (result.Status)
             {
