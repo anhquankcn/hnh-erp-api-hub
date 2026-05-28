@@ -94,11 +94,14 @@ public sealed class IngestionService : IIngestionService
         var correlationId = GetCorrelationId();
         var idempotencyKey = GetIdempotencyKey();
         var jobId = UlidGenerator.Generate();
+        var response = new IngestionResponse(jobId, "pending", correlationId);
+        string? idempotencyCacheKey = null;
+        var idempotencyClaimed = false;
 
         // Idempotency check
         if (!string.IsNullOrEmpty(idempotencyKey))
         {
-            var idempotencyCacheKey = $"idempotency:{tenantId}:{idempotencyKey}";
+            idempotencyCacheKey = $"idempotency:{tenantId}:{idempotencyKey}";
             var cached = await _cache.GetAsync<IngestionResponse>(idempotencyCacheKey, cancellationToken);
             if (cached is not null)
             {
@@ -121,6 +124,22 @@ public sealed class IngestionService : IIngestionService
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
+            if (idempotencyCacheKey is not null)
+            {
+                idempotencyClaimed = await _cache.TrySetAsync(idempotencyCacheKey, response, IdempotencyTtl, cancellationToken);
+                if (!idempotencyClaimed)
+                {
+                    var cached = await _cache.GetAsync<IngestionResponse>(idempotencyCacheKey, cancellationToken);
+                    if (cached is not null)
+                    {
+                        _logger.LogInformation("Idempotency cache hit for key {IdempotencyKey}", idempotencyKey);
+                        return cached;
+                    }
+
+                    throw new InvalidOperationException("Idempotency key is already being processed.");
+                }
+            }
+
             // Publish to RabbitMQ
             await PublishEventAsync(
                 doctype,
@@ -140,18 +159,15 @@ public sealed class IngestionService : IIngestionService
             // Audit log
             await AuditAsync(tenantId, "POST", $"/api/v1/ingest/{doctype}", 202, stopwatch.ElapsedMilliseconds, cancellationToken);
 
-            var response = new IngestionResponse(jobId, "pending", correlationId);
-
-            // Cache idempotency result
-            if (!string.IsNullOrEmpty(idempotencyKey))
-            {
-                await _cache.SetAsync($"idempotency:{tenantId}:{idempotencyKey}", response, IdempotencyTtl, cancellationToken);
-            }
-
             return response;
         }
         catch (Exception ex)
         {
+            if (idempotencyClaimed && idempotencyCacheKey is not null)
+            {
+                await _cache.RemoveAsync(idempotencyCacheKey, cancellationToken);
+            }
+
             stopwatch.Stop();
             _logger.LogError(ex, "Ingestion failed for doctype {Doctype}", doctype);
             RecordIngestionJob("failed");
@@ -424,7 +440,32 @@ public sealed class IngestionService : IIngestionService
         var existingInvoice = await _erpNextClient.GetAsync<JsonElement>(
             $"{SalesInvoiceDoctype}/{Uri.EscapeDataString(name)}",
             cancellationToken);
+        if (!existingInvoice.IsSuccessStatusCode || existingInvoice.Data is null)
+        {
+            await AuditAsync(
+                tenantId,
+                "INVOICE_STATUS_CHANGE_BLOCKED",
+                $"/api/v1/ingest/{doctype}/{name}",
+                StatusCodes.Status409Conflict,
+                0,
+                cancellationToken);
+
+            throw new InvoiceStatusChangeBlockedException("Invoice status could not be verified");
+        }
+
         var currentStatus = ExtractStatus(existingInvoice.Data);
+        if (currentStatus is null)
+        {
+            await AuditAsync(
+                tenantId,
+                "INVOICE_STATUS_CHANGE_BLOCKED",
+                $"/api/v1/ingest/{doctype}/{name}",
+                StatusCodes.Status409Conflict,
+                0,
+                cancellationToken);
+
+            throw new InvoiceStatusChangeBlockedException("Invoice status could not be verified");
+        }
 
         if (!string.Equals(currentStatus, IssuedStatus, StringComparison.Ordinal))
         {

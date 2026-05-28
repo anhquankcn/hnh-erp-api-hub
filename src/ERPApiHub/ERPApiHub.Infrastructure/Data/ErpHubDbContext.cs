@@ -149,6 +149,8 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options, I
             entity.Property(x => x.ClientIp).HasColumnName("client_ip").HasColumnType("inet");
             entity.Property(x => x.UserAgent).HasColumnName("user_agent").HasColumnType("text");
             entity.Property(x => x.CreatedAt).HasColumnName("created_at").HasColumnType("timestamp with time zone").HasDefaultValueSql("NOW()").IsRequired();
+            entity.Property(x => x.ArchiveStatus).HasColumnName("archive_status").HasMaxLength(20);
+            entity.Property(x => x.ArchiveClaimedAt).HasColumnName("archive_claimed_at").HasColumnType("timestamp with time zone");
             entity.HasOne(x => x.ExternalSystem)
                 .WithMany(x => x.AuditLogs)
                 .HasForeignKey(x => x.SystemId)

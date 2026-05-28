@@ -36,6 +36,8 @@ public interface IErpHubRepository
         int pageSize = 50,
         CancellationToken cancellationToken = default);
     Task<IReadOnlyList<AuditLog>> GetAuditLogsOlderThanAsync(DateTimeOffset cutoff, int limit, CancellationToken cancellationToken = default);
+    Task MarkAuditLogsArchivingAsync(IReadOnlyList<string> ids, DateTimeOffset claimedAt, CancellationToken cancellationToken = default);
+    Task ClearAuditLogsArchivingAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default);
     Task<int> CountAuditLogsAsync(CancellationToken cancellationToken = default);
     Task<int> CountAuditLogsOlderThanAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default);
     Task DeleteAuditLogsAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default);

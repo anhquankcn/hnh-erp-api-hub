@@ -31,7 +31,16 @@ public sealed class InvoiceDeletionGuard
         var invoice = await _erpNextClient.GetAsync<JsonElement>(
             $"{SalesInvoiceDoctype}/{Uri.EscapeDataString(name)}",
             cancellationToken);
+        if (!invoice.IsSuccessStatusCode || invoice.Data is null)
+        {
+            return new InvoiceDeletionResult(false, false, "Invoice status could not be verified");
+        }
+
         var status = ExtractStatus(invoice.Data);
+        if (status is null)
+        {
+            return new InvoiceDeletionResult(false, false, "Invoice status could not be verified");
+        }
 
         if (!string.Equals(status, IssuedStatus, StringComparison.Ordinal))
         {

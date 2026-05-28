@@ -190,6 +190,8 @@ public partial class InitialErpHubSchema : Migration
                 response_size_bytes INTEGER,
                 client_ip INET,
                 user_agent TEXT,
+                archive_status VARCHAR(20),
+                archive_claimed_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
                 PRIMARY KEY (log_id, created_at)
             ) PARTITION BY RANGE (created_at);

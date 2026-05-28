@@ -13,6 +13,8 @@ public interface IRedisCacheService
 
     Task SetAsync<T>(string key, T value, TimeSpan? ttl = null, CancellationToken cancellationToken = default);
 
+    Task<bool> TrySetAsync<T>(string key, T value, TimeSpan? ttl = null, CancellationToken cancellationToken = default);
+
     Task RemoveAsync(string key, CancellationToken cancellationToken = default);
 
     Task<T> GetOrCreateAsync<T>(
@@ -80,6 +82,18 @@ public sealed class RedisCacheService : IRedisCacheService, ICacheService
 
         var serializedValue = JsonSerializer.Serialize(value, SerializerOptions);
         await _database.StringSetAsync(BuildKey(key), serializedValue, ttl ?? _options.DefaultTtl);
+    }
+
+    public async Task<bool> TrySetAsync<T>(string key, T value, TimeSpan? ttl = null, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var serializedValue = JsonSerializer.Serialize(value, SerializerOptions);
+        return await _database.StringSetAsync(
+            BuildKey(key),
+            serializedValue,
+            ttl ?? _options.DefaultTtl,
+            When.NotExists);
     }
 
     public async Task RemoveAsync(string key, CancellationToken cancellationToken = default)

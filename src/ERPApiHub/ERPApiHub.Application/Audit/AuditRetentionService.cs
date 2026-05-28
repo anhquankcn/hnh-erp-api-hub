@@ -23,6 +23,7 @@ public sealed class AuditRetentionService : BackgroundService
     private readonly ICacheService _cache;
     private readonly IOptions<RetentionConfig> _options;
     private readonly ILogger<AuditRetentionService> _logger;
+    private readonly SemaphoreSlim _retentionLock = new(1, 1);
     private string? _lastHash;
 
     public AuditRetentionService(
@@ -71,68 +72,93 @@ public sealed class AuditRetentionService : BackgroundService
 
     public async Task RunRetentionAsync(CancellationToken cancellationToken = default)
     {
-        if (_lastHash is null)
+        await _retentionLock.WaitAsync(cancellationToken);
+        try
         {
-            await RestoreLastHashAsync(cancellationToken);
-        }
-
-        var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.Value.DefaultRetentionDays);
-        _logger.LogInformation("Running audit retention for logs older than {Cutoff:O}", cutoff);
-
-        var oldLogs = await _repository.GetAuditLogsOlderThanAsync(cutoff, _options.Value.BatchSize, cancellationToken);
-        if (oldLogs.Count == 0)
-        {
-            _logger.LogInformation("No audit logs to archive");
-            return;
-        }
-
-        _logger.LogInformation("Archiving {Count} audit logs", oldLogs.Count);
-
-        var archived = new List<ArchivedAuditLog>();
-        foreach (var log in oldLogs)
-        {
-            var hash = ComputeHash(log, _lastHash);
-            var archivedLog = new ArchivedAuditLog
+            if (_lastHash is null)
             {
-                Id = log.LogId,
-                EventType = log.Method,
-                EntityType = "http_request",
-                EntityId = log.RequestId ?? log.LogId,
-                Action = log.Endpoint,
-                PerformedBy = log.UserId ?? "anonymous",
-                PerformedAt = log.CreatedAt,
-                Details = JsonSerializer.Serialize(new
+                await RestoreLastHashAsync(cancellationToken);
+            }
+
+            var cutoff = DateTimeOffset.UtcNow.AddDays(-_options.Value.DefaultRetentionDays);
+            _logger.LogInformation("Running audit retention for logs older than {Cutoff:O}", cutoff);
+
+            var oldLogs = await _repository.GetAuditLogsOlderThanAsync(cutoff, _options.Value.BatchSize, cancellationToken);
+            if (oldLogs.Count == 0)
+            {
+                _logger.LogInformation("No audit logs to archive");
+                return;
+            }
+
+            _logger.LogInformation("Archiving {Count} audit logs", oldLogs.Count);
+
+            var logIds = oldLogs.Select(l => l.LogId).ToList();
+            await _repository.MarkAuditLogsArchivingAsync(logIds, DateTimeOffset.UtcNow, cancellationToken);
+
+            var archived = new List<ArchivedAuditLog>();
+            var nextLastHash = _lastHash;
+            foreach (var log in oldLogs)
+            {
+                var hash = ComputeHash(log, nextLastHash);
+                var archivedLog = new ArchivedAuditLog
                 {
-                    log.StatusCode,
-                    log.DurationMs,
-                    log.RequestSizeBytes,
-                    log.ResponseSizeBytes,
-                    ClientIp = log.ClientIp?.ToString(),
-                    log.UserAgent
-                }),
-                TenantId = log.TenantId,
-                ArchiveDate = DateTimeOffset.UtcNow,
-                Hash = hash,
-                PreviousHash = _lastHash,
-            };
-            archived.Add(archivedLog);
-            _lastHash = hash;
+                    Id = log.LogId,
+                    EventType = log.Method,
+                    EntityType = "http_request",
+                    EntityId = log.RequestId ?? log.LogId,
+                    Action = log.Endpoint,
+                    PerformedBy = log.UserId ?? "anonymous",
+                    PerformedAt = log.CreatedAt,
+                    Details = JsonSerializer.Serialize(new
+                    {
+                        log.StatusCode,
+                        log.DurationMs,
+                        log.RequestSizeBytes,
+                        log.ResponseSizeBytes,
+                        ClientIp = log.ClientIp?.ToString(),
+                        log.UserAgent
+                    }),
+                    TenantId = log.TenantId,
+                    ArchiveDate = DateTimeOffset.UtcNow,
+                    Hash = hash,
+                    PreviousHash = nextLastHash,
+                };
+                archived.Add(archivedLog);
+                nextLastHash = hash;
+            }
+
+            // Write to blob storage
+            var archivePath = $"audit/{DateTimeOffset.UtcNow:yyyy/MM/dd}/archive-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json";
+            var stream = new MemoryStream();
+            await JsonSerializer.SerializeAsync(
+                stream,
+                archived,
+                new JsonSerializerOptions { WriteIndented = true },
+                cancellationToken);
+            stream.Position = 0;
+
+            try
+            {
+                await _blobStorage.UploadAsync(archivePath, stream, cancellationToken);
+            }
+            catch
+            {
+                await _repository.ClearAuditLogsArchivingAsync(logIds, cancellationToken);
+                throw;
+            }
+
+            await _repository.DeleteAuditLogsAsync(logIds, cancellationToken);
+            _lastHash = nextLastHash;
+            await _cache.SetAsync(LastHashCacheKey, _lastHash, cancellationToken: cancellationToken);
+
+            await _cache.SetAsync(LastRunCacheKey, DateTimeOffset.UtcNow, cancellationToken: cancellationToken);
+
+            _logger.LogInformation("Archived {Count} logs to {Path}", archived.Count, archivePath);
         }
-
-        await _cache.SetAsync(LastHashCacheKey, _lastHash, cancellationToken: cancellationToken);
-
-        // Write to blob storage
-        var archivePath = $"audit/{DateTimeOffset.UtcNow:yyyy/MM/dd}/archive-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}.json";
-        var json = JsonSerializer.Serialize(archived, new JsonSerializerOptions { WriteIndented = true });
-        var stream = new MemoryStream(Encoding.UTF8.GetBytes(json));
-        await _blobStorage.UploadAsync(archivePath, stream, cancellationToken);
-
-        // Delete archived logs from DB
-        await _repository.DeleteAuditLogsAsync(oldLogs.Select(l => l.LogId).ToList(), cancellationToken);
-
-        await _cache.SetAsync(LastRunCacheKey, DateTimeOffset.UtcNow, cancellationToken: cancellationToken);
-
-        _logger.LogInformation("Archived {Count} logs to {Path}", archived.Count, archivePath);
+        finally
+        {
+            _retentionLock.Release();
+        }
     }
 
     public async Task<RetentionStatus> GetRetentionStatusAsync(CancellationToken cancellationToken = default)
