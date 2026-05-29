@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Domain.Events;
 using Microsoft.Extensions.Logging;
@@ -14,6 +15,9 @@ public sealed class LinkFieldValidator(
 {
     private readonly LinkFieldValidationOptions _options = options.Value;
     private static readonly TimeSpan SchemaCacheTtl = TimeSpan.FromHours(1);
+    private static readonly Regex DoctypeWhitelistPattern = new(
+        "^[A-Za-z][A-Za-z0-9_]*$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private const string SchemaCachePrefix = "erphub:schema";
 
     public async Task<LinkValidationResult> ValidateAsync(
@@ -66,8 +70,24 @@ public sealed class LinkFieldValidator(
 
             try
             {
+                if (!IsWhitelistedDoctype(linkField.LinkedDoctype))
+                {
+                    logger.LogWarning(
+                        "Skipping link validation for {Doctype}.{Field} because linked doctype failed whitelist validation.",
+                        doctype,
+                        linkField.FieldName);
+
+                    invalidFields.Add(new InvalidLinkField(
+                        linkField.FieldName,
+                        value,
+                        linkField.LinkedDoctype,
+                        "Invalid linked doctype"));
+
+                    continue;
+                }
+
                 var exists = await CheckRecordExistsAsync(
-                    linkField.LinkedDoctype!,
+                    linkField.LinkedDoctype,
                     value,
                     linkedCts.Token);
 
@@ -76,14 +96,14 @@ public sealed class LinkFieldValidator(
                     validFields.Add(new ValidLinkField(
                         linkField.FieldName,
                         value,
-                        linkField.LinkedDoctype!));
+                        linkField.LinkedDoctype));
                 }
                 else
                 {
                     invalidFields.Add(new InvalidLinkField(
                         linkField.FieldName,
                         value,
-                        linkField.LinkedDoctype!,
+                        linkField.LinkedDoctype,
                         $"Record '{value}' not found in '{linkField.LinkedDoctype}'"));
                 }
             }
@@ -99,7 +119,7 @@ public sealed class LinkFieldValidator(
                 invalidFields.Add(new InvalidLinkField(
                     linkField.FieldName,
                     value,
-                    linkField.LinkedDoctype!,
+                    linkField.LinkedDoctype,
                     "Validation timeout"));
             }
             catch (Exception ex)
@@ -115,8 +135,8 @@ public sealed class LinkFieldValidator(
                 invalidFields.Add(new InvalidLinkField(
                     linkField.FieldName,
                     value,
-                    linkField.LinkedDoctype!,
-                    $"Validation error: {ex.Message}"));
+                    linkField.LinkedDoctype,
+                    "Validation error"));
             }
         }
 
@@ -195,18 +215,28 @@ public sealed class LinkFieldValidator(
         string value,
         CancellationToken ct)
     {
-        try
+        if (!IsWhitelistedDoctype(linkedDoctype))
+            throw new ArgumentException("Invalid doctype format.", nameof(linkedDoctype));
+
+        var response = await erpNextClient.GetAsync<JsonElement>(
+            $"resource/{Uri.EscapeDataString(linkedDoctype)}/{Uri.EscapeDataString(value)}",
+            ct);
+
+        if (response.IsSuccessStatusCode)
         {
-            var response = await erpNextClient.GetAsync<JsonElement>(
-                $"resource/{Uri.EscapeDataString(linkedDoctype)}/{Uri.EscapeDataString(value)}",
-                ct);
-            return response.IsSuccessStatusCode;
+            return true;
         }
-        catch
+
+        if (response.StatusCode == 404)
         {
             return false;
         }
+
+        throw new InvalidOperationException("ERPNext link lookup failed.");
     }
+
+    private static bool IsWhitelistedDoctype(string? doctype) =>
+        !string.IsNullOrWhiteSpace(doctype) && DoctypeWhitelistPattern.IsMatch(doctype);
 }
 
 public sealed record DocFieldSchema(

@@ -6,7 +6,7 @@ public sealed class AuditStatsResponse
     public long SuccessCount { get; set; }
     public long FailureCount { get; set; }
     public long WarningCount { get; set; }
-    public Dictionary<string, long> EventsByType { get; set; } = [];
-    public Dictionary<string, long> EventsByTenant { get; set; } = [];
-    public Dictionary<string, long> EventsByDay { get; set; } = [];
+    public IReadOnlyDictionary<string, long> EventsByType { get; set; } = new Dictionary<string, long>();
+    public IReadOnlyDictionary<string, long> EventsByTenant { get; set; } = new Dictionary<string, long>();
+    public IReadOnlyDictionary<string, long> EventsByDay { get; set; } = new Dictionary<string, long>();
 }

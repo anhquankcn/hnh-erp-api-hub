@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Collections.Concurrent;
 using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Domain.Entities;
 using Microsoft.Extensions.Logging;
@@ -10,6 +11,8 @@ public sealed class AuditSearchService
 {
     private const int MaxPageSize = 500;
     private const int DefaultExportMaxRecords = 10000;
+    private const int MaxExportRecords = 100_000;
+    private const int MaxStatsRecords = 100_000;
     private const int ExportBatchSize = 500;
     private readonly IErpHubRepository _repository;
     private readonly ILogger<AuditSearchService> _logger;
@@ -53,6 +56,13 @@ public sealed class AuditSearchService
     {
         var format = NormalizeExportFormat(query.Format);
         var maxRecords = Math.Max(query.MaxRecords ?? DefaultExportMaxRecords, 1);
+        if (maxRecords > MaxExportRecords)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(query),
+                $"Export is limited to {MaxExportRecords} records.");
+        }
+
         var stream = new MemoryStream();
 
         if (format == "json")
@@ -74,19 +84,25 @@ public sealed class AuditSearchService
         var stats = new AuditStatsResult();
         var page = 1;
 
-        while (true)
+        while (stats.TotalEvents < MaxStatsRecords)
         {
+            var pageSize = (int)Math.Min(ExportBatchSize, MaxStatsRecords - stats.TotalEvents);
             var (items, total) = await _repository.GetAuditLogsAsync(
                 fromDate: fromDate,
                 toDate: toDate,
                 page: page,
-                pageSize: ExportBatchSize,
+                pageSize: pageSize,
                 sortBy: "createdAt",
                 sortDirection: "desc",
                 cancellationToken: ct);
 
             foreach (var item in items)
             {
+                if (stats.TotalEvents >= MaxStatsRecords)
+                {
+                    break;
+                }
+
                 var mapped = MapLog(item);
                 stats.TotalEvents++;
 
@@ -193,8 +209,13 @@ public sealed class AuditSearchService
 
             foreach (var item in items)
             {
-                yield return MapLog(item);
+                if (emitted >= maxRecords)
+                {
+                    yield break;
+                }
+
                 emitted++;
+                yield return MapLog(item);
             }
 
             page++;
@@ -242,15 +263,22 @@ public sealed class AuditSearchService
             return string.Empty;
         }
 
-        return value.IndexOfAny([',', '"', '\r', '\n']) >= 0
-            ? $"\"{value.Replace("\"", "\"\"", StringComparison.Ordinal)}\""
-            : value;
+        if (value.IndexOfAny([',', '"', '\r', '\n']) < 0)
+        {
+            return value;
+        }
+
+        var escaped = value
+            .Replace("\"", "\"\"", StringComparison.Ordinal)
+            .Replace("\r", "\\r", StringComparison.Ordinal)
+            .Replace("\n", "\\n", StringComparison.Ordinal);
+
+        return $"\"{escaped}\"";
     }
 
-    private static void Increment(Dictionary<string, long> values, string key)
+    private static void Increment(ConcurrentDictionary<string, long> values, string key)
     {
-        values.TryGetValue(key, out var count);
-        values[key] = count + 1;
+        values.AddOrUpdate(key, 1, (_, count) => count + 1);
     }
 }
 
@@ -308,7 +336,7 @@ public sealed class AuditStatsResult
     public long SuccessCount { get; set; }
     public long FailureCount { get; set; }
     public long WarningCount { get; set; }
-    public Dictionary<string, long> EventsByType { get; set; } = [];
-    public Dictionary<string, long> EventsByTenant { get; set; } = [];
-    public Dictionary<string, long> EventsByDay { get; set; } = [];
+    public ConcurrentDictionary<string, long> EventsByType { get; set; } = [];
+    public ConcurrentDictionary<string, long> EventsByTenant { get; set; } = [];
+    public ConcurrentDictionary<string, long> EventsByDay { get; set; } = [];
 }
