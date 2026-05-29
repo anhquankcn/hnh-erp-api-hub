@@ -10,6 +10,9 @@ namespace ERPApiHub.Application.Auth;
 
 public sealed class TokenService
 {
+    private const string TokenPrefix = "erphub_";
+    private const string TokenIndexKey = "erphub:api-tokens:index";
+    private static readonly TimeSpan TokenMetadataTtl = TimeSpan.FromDays(3700);
     private readonly HttpClient _httpClient;
     private readonly ICacheService _cache;
     private readonly IOptions<KeycloakTokenOptions> _keycloakOptions;
@@ -129,6 +132,172 @@ public sealed class TokenService
     public Task<bool> IsTokenBlacklistedAsync(string jti, CancellationToken cancellationToken = default)
         => _cache.ExistsAsync($"erphub:token-blacklist:{jti}", cancellationToken);
 
+    public async Task<ApiTokenRecord> GenerateTokenAsync(
+        CreateApiTokenCommand command,
+        string createdBy,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(command.SystemId))
+            throw new ArgumentException("SystemId is required.", nameof(command));
+
+        if (command.ExpiryDays <= 0)
+            throw new ArgumentException("ExpiryDays must be greater than 0.", nameof(command));
+
+        var now = DateTimeOffset.UtcNow;
+        var plainToken = GeneratePlainToken();
+        var record = new ApiTokenRecord
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            SystemId = command.SystemId.Trim(),
+            Description = command.Description?.Trim(),
+            Permissions = command.Permissions,
+            Status = ApiTokenStatuses.Active,
+            TokenHash = HashToken(plainToken),
+            CreatedAt = now,
+            ExpiresAt = now.AddDays(command.ExpiryDays),
+            CreatedBy = createdBy
+        };
+
+        await StoreTokenAsync(record, cancellationToken);
+        await AddToIndexAsync(record.Id, cancellationToken);
+
+        _logger.LogInformation("API token {TokenId} created for system {SystemId}", record.Id, record.SystemId);
+        return record;
+    }
+
+    public async Task<ApiTokenRecord?> RotateTokenAsync(
+        string id,
+        string rotatedBy,
+        CancellationToken cancellationToken = default)
+    {
+        var existing = await GetTokenAsync(id, cancellationToken);
+        if (existing is null)
+            return null;
+
+        await _cache.RemoveAsync(TokenHashKey(existing.TokenHash), cancellationToken);
+
+        var now = DateTimeOffset.UtcNow;
+        var plainToken = GeneratePlainToken();
+        var rotated = existing with
+        {
+            Status = ApiTokenStatuses.Active,
+            TokenHash = HashToken(plainToken),
+            RotatedAt = now,
+            RevokedAt = null,
+            RevokedBy = null,
+            UpdatedAt = now,
+            UpdatedBy = rotatedBy
+        };
+
+        await StoreTokenAsync(rotated, cancellationToken);
+
+        _logger.LogInformation("API token {TokenId} rotated", id);
+        return rotated;
+    }
+
+    public async Task<bool> RevokeTokenAsync(
+        string id,
+        string revokedBy,
+        CancellationToken cancellationToken = default)
+    {
+        var existing = await GetTokenAsync(id, cancellationToken);
+        if (existing is null)
+            return false;
+
+        await _cache.RemoveAsync(TokenHashKey(existing.TokenHash), cancellationToken);
+
+        var now = DateTimeOffset.UtcNow;
+        var revoked = existing with
+        {
+            Status = ApiTokenStatuses.Revoked,
+            RevokedAt = now,
+            RevokedBy = revokedBy,
+            UpdatedAt = now,
+            UpdatedBy = revokedBy
+        };
+
+        await StoreTokenAsync(revoked, cancellationToken);
+
+        _logger.LogInformation("API token {TokenId} revoked", id);
+        return true;
+    }
+
+    public async Task<ApiTokenListResult> ListTokensAsync(
+        string? systemId,
+        string? status,
+        int page,
+        int pageSize,
+        CancellationToken cancellationToken = default)
+    {
+        if (page <= 0)
+            throw new ArgumentException("Page must be greater than 0.", nameof(page));
+
+        if (pageSize <= 0 || pageSize > 100)
+            throw new ArgumentException("PageSize must be between 1 and 100.", nameof(pageSize));
+
+        var ids = await _cache.GetAsync<List<string>>(TokenIndexKey, cancellationToken) ?? [];
+        var tokens = new List<ApiTokenRecord>();
+
+        foreach (var id in ids.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var token = await GetTokenAsync(id, cancellationToken);
+            if (token is null)
+                continue;
+
+            tokens.Add(MarkExpiredIfNeeded(token));
+        }
+
+        var effectiveStatus = string.IsNullOrWhiteSpace(status) ? ApiTokenStatuses.Active : status;
+        var filtered = tokens
+            .Where(t => string.IsNullOrWhiteSpace(systemId) || t.SystemId.Equals(systemId, StringComparison.OrdinalIgnoreCase))
+            .Where(t => t.Status.Equals(effectiveStatus, StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(t => t.CreatedAt)
+            .ToList();
+
+        return new ApiTokenListResult(
+            filtered.Skip((page - 1) * pageSize).Take(pageSize).ToList(),
+            filtered.Count,
+            page,
+            pageSize);
+    }
+
+    public async Task<ApiTokenRecord?> GetTokenAsync(string id, CancellationToken cancellationToken = default)
+    {
+        var token = await _cache.GetAsync<ApiTokenRecord>(TokenKey(id), cancellationToken);
+        return token is null ? null : MarkExpiredIfNeeded(token);
+    }
+
+    public async Task<ApiTokenValidationResult> ValidateTokenAsync(string token, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+            return ApiTokenValidationResult.Invalid("Token is required.");
+
+        // Get all active tokens and verify against each (constant-time for security)
+        var ids = await _cache.GetAsync<List<string>>(TokenIndexKey, cancellationToken) ?? [];
+        foreach (var id in ids)
+        {
+            var record = await GetTokenAsync(id, cancellationToken);
+            if (record is null || !record.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (BCrypt.Net.BCrypt.Verify(token.Trim(), record.TokenHash))
+            {
+                if (record.ExpiresAt <= DateTimeOffset.UtcNow)
+                    return ApiTokenValidationResult.Invalid("Token has expired.", record.Id, record.SystemId);
+
+                return new ApiTokenValidationResult(
+                    true,
+                    record.Id,
+                    record.SystemId,
+                    record.Permissions,
+                    record.ExpiresAt,
+                    null);
+            }
+        }
+
+        return ApiTokenValidationResult.Invalid("Token was not found or has been revoked.");
+    }
+
     /// <summary>
     /// Legacy method: parses token without signature validation.
     /// Use ValidateAndDecodeToken for secure validation.
@@ -144,6 +313,60 @@ public sealed class TokenService
         var padded = input.Length % 4 == 0 ? input : input + new string('=', 4 - input.Length % 4);
         return Convert.FromBase64String(padded.Replace('-', '+').Replace('_', '/'));
     }
+
+    private async Task StoreTokenAsync(ApiTokenRecord token, CancellationToken cancellationToken)
+    {
+        await _cache.SetAsync(TokenKey(token.Id), token, TokenMetadataTtl, cancellationToken);
+
+        if (token.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase))
+        {
+            var ttl = token.ExpiresAt - DateTimeOffset.UtcNow;
+            if (ttl > TimeSpan.Zero)
+            {
+                await _cache.SetAsync(TokenHashKey(token.TokenHash), token.Id, ttl, cancellationToken);
+            }
+        }
+    }
+
+    private async Task AddToIndexAsync(string id, CancellationToken cancellationToken)
+    {
+        var ids = await _cache.GetAsync<List<string>>(TokenIndexKey, cancellationToken) ?? [];
+        if (!ids.Contains(id, StringComparer.OrdinalIgnoreCase))
+        {
+            ids.Add(id);
+            await _cache.SetAsync(TokenIndexKey, ids, TokenMetadataTtl, cancellationToken);
+        }
+    }
+
+    private static ApiTokenRecord MarkExpiredIfNeeded(ApiTokenRecord token)
+    {
+        if (token.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase) &&
+            token.ExpiresAt <= DateTimeOffset.UtcNow)
+        {
+            return token with { Status = ApiTokenStatuses.Expired };
+        }
+
+        return token;
+    }
+
+    private static string GeneratePlainToken()
+    {
+        Span<byte> bytes = stackalloc byte[32];
+        RandomNumberGenerator.Fill(bytes);
+        return $"{TokenPrefix}{Base64UrlEncode(bytes)}";
+    }
+
+    private static string HashToken(string token)
+    {
+        return BCrypt.Net.BCrypt.HashPassword(token, workFactor: 12);
+    }
+
+    private static string Base64UrlEncode(ReadOnlySpan<byte> bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static string TokenKey(string id) => $"erphub:api-tokens:{id}";
+
+    private static string TokenHashKey(string hash) => $"erphub:api-tokens:hash:{hash}";
 }
 
 public sealed record TokenRefreshResult(string AccessToken, string? RefreshToken);
@@ -160,4 +383,53 @@ public sealed class KeycloakTokenOptions
     public string Authority { get; set; } = string.Empty;
     public string ClientId { get; set; } = string.Empty;
     public string ClientSecret { get; set; } = string.Empty;
+}
+
+public sealed record CreateApiTokenCommand(
+    string SystemId,
+    string? Description,
+    int ExpiryDays,
+    IReadOnlyList<string> Permissions);
+
+public sealed record ApiTokenRecord
+{
+    public string Id { get; init; } = string.Empty;
+    public string SystemId { get; init; } = string.Empty;
+    public string? Description { get; init; }
+    public IReadOnlyList<string> Permissions { get; init; } = [];
+    public string Status { get; init; } = ApiTokenStatuses.Active;
+    public string TokenHash { get; init; } = string.Empty;
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset ExpiresAt { get; init; }
+    public DateTimeOffset? RotatedAt { get; init; }
+    public DateTimeOffset? RevokedAt { get; init; }
+    public string? CreatedBy { get; init; }
+    public DateTimeOffset? UpdatedAt { get; init; }
+    public string? UpdatedBy { get; init; }
+    public string? RevokedBy { get; init; }
+}
+
+public sealed record ApiTokenListResult(
+    IReadOnlyList<ApiTokenRecord> Items,
+    int Total,
+    int Page,
+    int PageSize);
+
+public sealed record ApiTokenValidationResult(
+    bool IsValid,
+    string? TokenId,
+    string? SystemId,
+    IReadOnlyList<string> Permissions,
+    DateTimeOffset? ExpiresAt,
+    string? Reason)
+{
+    public static ApiTokenValidationResult Invalid(string reason, string? tokenId = null, string? systemId = null) =>
+        new(false, tokenId, systemId, [], null, reason);
+}
+
+public static class ApiTokenStatuses
+{
+    public const string Active = "active";
+    public const string Revoked = "revoked";
+    public const string Expired = "expired";
 }

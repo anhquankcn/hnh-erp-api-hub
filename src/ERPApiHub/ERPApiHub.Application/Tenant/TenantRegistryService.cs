@@ -111,7 +111,9 @@ public sealed class TenantRegistryService
             return new TenantHealthStatus(tenantId, "not_found", false, DateTimeOffset.UtcNow);
         }
 
-        var isHealthy = tenant.IsActive && string.Equals(tenant.HealthStatus, "active", StringComparison.OrdinalIgnoreCase);
+        var isHealthy = tenant.IsActive
+            && (string.Equals(tenant.HealthStatus, "active", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(tenant.HealthStatus, "healthy", StringComparison.OrdinalIgnoreCase));
         var status = new TenantHealthStatus(tenant.TenantId, tenant.HealthStatus, isHealthy, DateTimeOffset.UtcNow);
 
         await _cacheService.SetAsync($"{TenantCacheKey(tenantId)}:health", status, CacheTtl, cancellationToken);

@@ -3,6 +3,7 @@ using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
 using ERPApiHub.Application.Exceptions;
 using ERPApiHub.Application.Observability;
+using ERPApiHub.Application.Validation;
 using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
 using Microsoft.AspNetCore.Http;
@@ -56,6 +57,8 @@ public sealed class IngestionService : IIngestionService
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly IMessageBus _messageBus;
     private readonly InvoiceDeletionGuard _invoiceDeletionGuard;
+    private readonly LinkFieldValidator _linkFieldValidator;
+    private readonly LinkFieldValidationOptions _linkFieldOptions;
     private readonly IErpNextClient _erpNextClient;
     private readonly ILogger<IngestionService> _logger;
     private static readonly TimeSpan IdempotencyTtl = TimeSpan.FromMinutes(5);
@@ -71,6 +74,8 @@ public sealed class IngestionService : IIngestionService
         IHttpContextAccessor httpContextAccessor,
         IMessageBus messageBus,
         InvoiceDeletionGuard invoiceDeletionGuard,
+        LinkFieldValidator linkFieldValidator,
+        LinkFieldValidationOptions linkFieldOptions,
         IErpNextClient erpNextClient,
         ILogger<IngestionService> logger)
     {
@@ -80,6 +85,8 @@ public sealed class IngestionService : IIngestionService
         _httpContextAccessor = httpContextAccessor;
         _messageBus = messageBus;
         _invoiceDeletionGuard = invoiceDeletionGuard;
+        _linkFieldValidator = linkFieldValidator;
+        _linkFieldOptions = linkFieldOptions;
         _erpNextClient = erpNextClient;
         _logger = logger;
     }
@@ -119,6 +126,13 @@ public sealed class IngestionService : IIngestionService
         if (!string.IsNullOrEmpty(name))
         {
             await ValidateInvoiceStatusChangeAsync(tenantId, doctype, name, payload, cancellationToken);
+        }
+
+        // Validate link fields
+        var linkValidation = await ValidateLinkFieldsAsync(tenantId, doctype, payload, cancellationToken);
+        if (linkValidation is not null)
+        {
+            return linkValidation;
         }
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -440,7 +454,7 @@ public sealed class IngestionService : IIngestionService
         var existingInvoice = await _erpNextClient.GetAsync<JsonElement>(
             $"{SalesInvoiceDoctype}/{Uri.EscapeDataString(name)}",
             cancellationToken);
-        if (!existingInvoice.IsSuccessStatusCode || existingInvoice.Data is null)
+        if (!existingInvoice.IsSuccessStatusCode || existingInvoice.Data.ValueKind == JsonValueKind.Undefined)
         {
             await AuditAsync(
                 tenantId,
@@ -569,5 +583,61 @@ public sealed class IngestionService : IIngestionService
     private string? GetIdempotencyKey()
     {
         return _httpContextAccessor.HttpContext?.Request.Headers["X-Idempotency-Key"].FirstOrDefault();
+    }
+
+    private async Task<IngestionResponse?> ValidateLinkFieldsAsync(
+        string tenantId,
+        string doctype,
+        JsonElement payload,
+        CancellationToken ct)
+    {
+        if (!_linkFieldOptions.Enabled || _linkFieldOptions.ExcludedDoctypes.Contains(doctype, StringComparer.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        if (payload.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        try
+        {
+            var fields = JsonSerializer.Deserialize<Dictionary<string, object?>>(payload.GetRawText());
+            if (fields is null || fields.Count == 0)
+            {
+                return null;
+            }
+
+            var validation = await _linkFieldValidator.ValidateAsync(tenantId, doctype, fields, ct);
+
+            if (!validation.IsValid && _linkFieldOptions.FailOnInvalid)
+            {
+                var invalidFieldNames = string.Join(", ", validation.InvalidFields.Select(f => $"{f.FieldName}={f.Value}"));
+                _logger.LogWarning(
+                    "Link field validation failed for {Doctype}: {InvalidFields}",
+                    doctype,
+                    invalidFieldNames);
+                return new IngestionResponse(
+                    UlidGenerator.Generate(),
+                    "rejected",
+                    GetCorrelationId());
+            }
+
+            if (!validation.IsValid)
+            {
+                var invalidFieldNames = string.Join(", ", validation.InvalidFields.Select(f => $"{f.FieldName}={f.Value}"));
+                _logger.LogWarning(
+                    "Link field validation warnings for {Doctype}: {InvalidFields}",
+                    doctype,
+                    invalidFieldNames);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Link field validation error for {Doctype}; allowing through", doctype);
+        }
+
+        return null;
     }
 }
