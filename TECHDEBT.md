@@ -21,16 +21,35 @@
 - **Risk**: Crash between calls = leaked rate limit key (no expiration)
 - **Fix**: Use Redis Lua script or pipeline for atomic INCR+EXPIRE
 
-### S6-002: PDPA REST Endpoints ✅ FIXED
-- [x] Added DB persistence via `PdpaService`
-- [x] Composite key for multiple purposes
-- [x] Real timestamps from DB
+### S6-002: PDPA REST Endpoints ⚠️ COMPILE ERRORS (11 errors in PdpaService.cs)
+- **Issue**: `PdpaService.cs` defines local `ConsentRecord` class conflicting with `ERPApiHub.Domain.Entities.ConsentRecord`
+- **Errors**: Type mismatch, missing properties (`Id`, `ExpiresAt`, `IsActive`, `Notes`, `Doctypes`, `CreatedAt`, `UpdatedAt`)
+- **Fix Required**: Remove local class, use `ERPApiHub.Domain.Entities.ConsentRecord`; add missing properties to Domain entity or adjust mapping
+- **Effort**: ~30 min
+- **Planned For**: Sprint 6 hotfix or Sprint 7
 
 ### S6-001: Polling Fallback Worker ✅ FIXED
 - [x] Internal pagination + guard cursor
 - [x] Prevent data loss when >100 records share timestamp
 
-## Next Review Items
-- S6-004: Tenant Health Check Background Job
-- S6-005: Audit Search & Export API
-- S6-006: Link-Field Validation
+## Pre-existing Compile Errors (unrelated to Sprint 6 features)
+
+### Auth/TokenService.cs (S6-003)
+- **Errors**: `ApiTokenRecord` does not contain `PlainToken` (5 errors at lines 159, 191, 219, 322, 352)
+- **Fix**: Align `TokenService` with `ApiTokenRecord` entity definition (remove `PlainToken` references)
+
+### Ingestion/IngestionService.cs & Query/QueryService.cs
+- **Errors**: `IErpHubRepository` missing `CreateAuditLogAsync` (3 errors)
+- **Errors**: `JsonElement` null assignment (2 errors in `InvoiceDeletionGuard.cs`, `IngestionService.cs`)
+- **Note**: These are pre-existing API mismatches, not introduced by Sprint 6
+
+## Fixed in Sprint 6
+- [x] S6-004: Tenant Health Check Background Job
+- [x] S6-005: Audit Search & Export API
+- [x] S6-006: Link-Field Validation
+
+## Next Actions
+1. Fix S6-002 compile errors (PdpaService.cs local class conflict)
+2. Fix S6-003 compile errors (ApiTokenRecord.PlainToken)
+3. Fix pre-existing `CreateAuditLogAsync` and `JsonElement` null errors
+4. Continue with S6-003 remaining WARNs (timing attack, rate limit)
