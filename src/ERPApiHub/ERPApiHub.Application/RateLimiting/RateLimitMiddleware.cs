@@ -44,18 +44,15 @@ public sealed class RateLimitMiddleware
             return;
         }
 
-        // Skip for anonymous endpoints
-        if (!context.User.Identity?.IsAuthenticated ?? true)
-        {
-            await _next(context);
-            return;
-        }
+        var isAuthenticated = context.User.Identity?.IsAuthenticated == true;
 
-        // Resolve system_id from JWT claims or default
-        var systemId = context.User.FindFirst("sub")?.Value
-            ?? context.User.FindFirst("preferred_username")?.Value
-            ?? "anonymous";
-        var tenantId = context.User.FindFirst("BranchId")?.Value;
+        // Resolve system_id from JWT claims or client IP for anonymous API requests.
+        var systemId = isAuthenticated
+            ? context.User.FindFirst("sub")?.Value
+                ?? context.User.FindFirst("preferred_username")?.Value
+                ?? "anonymous"
+            : $"ip:{context.Connection.RemoteIpAddress?.ToString() ?? "unknown"}";
+        var tenantId = isAuthenticated ? context.User.FindFirst("BranchId")?.Value : null;
 
         // Resolve tier — look up from external_systems if available, else default
         var tier = options.DefaultTier;

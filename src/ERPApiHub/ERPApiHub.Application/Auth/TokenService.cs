@@ -14,10 +14,14 @@ public sealed class TokenService
     private const string TokenIndexKey = "erphub:api-tokens:index";
     private const string InvalidTokenReason = "Invalid token";
     private static readonly TimeSpan TokenMetadataTtl = TimeSpan.FromDays(3700);
+    private static readonly TimeSpan JwksCacheTtl = TimeSpan.FromMinutes(10);
+    private readonly object _jwksLock = new();
     private readonly HttpClient _httpClient;
     private readonly ICacheService _cache;
     private readonly IOptions<KeycloakTokenOptions> _keycloakOptions;
     private readonly ILogger<TokenService> _logger;
+    private IReadOnlyList<JwksKey> _jwksKeys = [];
+    private DateTimeOffset _jwksExpiresAt;
 
     public TokenService(
         IHttpClientFactory httpClientFactory,
@@ -46,11 +50,14 @@ public sealed class TokenService
             var payload = Base64UrlDecode(parts[1]);
             var signature = Base64UrlDecode(parts[2]);
 
-            // Validate signature if key provided
-            if (signingKey is not null)
+            var headerJson = JsonSerializer.Deserialize<JsonElement>(header);
+            var alg = headerJson.TryGetProperty("alg", out var algProp) ? algProp.GetString() : null;
+
+            // Validate signed tokens by default, and always validate when a caller supplied a key.
+            if (signingKey is not null || alg is "RS256" or "HS256")
             {
                 var data = Encoding.UTF8.GetBytes($"{parts[0]}.{parts[1]}");
-                if (!ValidateSignature(data, signature, header))
+                if (!ValidateSignature(data, signature, headerJson, signingKey))
                     return null;
             }
 
@@ -81,20 +88,46 @@ public sealed class TokenService
         }
     }
 
-    private static bool ValidateSignature(byte[] data, byte[] signature, ReadOnlySpan<byte> header)
+    private bool ValidateSignature(byte[] data, byte[] signature, JsonElement headerJson, byte[]? signingKey)
     {
-        var headerJson = JsonSerializer.Deserialize<JsonElement>(header);
         var alg = headerJson.TryGetProperty("alg", out var algProp) ? algProp.GetString() : "RS256";
+        var kid = headerJson.TryGetProperty("kid", out var kidProp) ? kidProp.GetString() : null;
 
-        if (alg == "RS256" || alg == "HS256")
+        if (alg == "HS256")
         {
-            using var rsa = RSA.Create();
-            // RS256: signature validation requires public key — caller must provide it
-            // For now, skip if no key configured (development) or use HMAC if HS256
-            return true; // Placeholder: proper RSA validation requires JWKS fetch
+            var secret = signingKey ?? Encoding.UTF8.GetBytes(_keycloakOptions.Value.ClientSecret);
+            if (secret.Length == 0)
+                return false;
+
+            using var hmac = new HMACSHA256(secret);
+            var computed = hmac.ComputeHash(data);
+            return CryptographicOperations.FixedTimeEquals(computed, signature);
         }
 
-        return true;
+        if (alg == "RS256")
+        {
+            foreach (var key in GetJwksKeys().Where(k => string.IsNullOrWhiteSpace(kid) || k.Kid == kid))
+            {
+                try
+                {
+                    using var rsa = RSA.Create();
+                    rsa.ImportParameters(new RSAParameters
+                    {
+                        Modulus = Base64UrlDecode(key.N),
+                        Exponent = Base64UrlDecode(key.E)
+                    });
+
+                    if (rsa.VerifyData(data, signature, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1))
+                        return true;
+                }
+                catch (Exception ex) when (ex is ArgumentException or CryptographicException or FormatException)
+                {
+                    _logger.LogWarning(ex, "Invalid JWKS key encountered while validating token signature.");
+                }
+            }
+        }
+
+        return false;
     }
 
     public async Task<TokenRefreshResult?> RefreshTokenAsync(string refreshToken, CancellationToken cancellationToken = default)
@@ -154,6 +187,7 @@ public sealed class TokenService
             Permissions = command.Permissions,
             Status = ApiTokenStatuses.Active,
             TokenHash = HashToken(plainToken),
+            TokenLookupHash = HashTokenForLookup(plainToken),
             CreatedAt = now,
             ExpiresAt = now.AddDays(command.ExpiryDays),
             CreatedBy = createdBy
@@ -176,6 +210,7 @@ public sealed class TokenService
             return null;
 
         await _cache.RemoveAsync(TokenHashKey(existing.TokenHash), cancellationToken);
+        await RemoveTokenLookupAsync(existing, cancellationToken);
 
         var now = DateTimeOffset.UtcNow;
         var plainToken = GeneratePlainToken();
@@ -183,6 +218,7 @@ public sealed class TokenService
         {
             Status = ApiTokenStatuses.Active,
             TokenHash = HashToken(plainToken),
+            TokenLookupHash = HashTokenForLookup(plainToken),
             RotatedAt = now,
             RevokedAt = null,
             RevokedBy = null,
@@ -206,6 +242,7 @@ public sealed class TokenService
             return false;
 
         await _cache.RemoveAsync(TokenHashKey(existing.TokenHash), cancellationToken);
+        await RemoveTokenLookupAsync(existing, cancellationToken);
 
         var now = DateTimeOffset.UtcNow;
         var revoked = existing with
@@ -274,22 +311,20 @@ public sealed class TokenService
             return ApiTokenValidationResult.Invalid(InvalidTokenReason);
 
         var normalizedToken = token.Trim();
-        ApiTokenRecord? matchedRecord = null;
-        var ids = await _cache.GetAsync<List<string>>(TokenIndexKey, cancellationToken) ?? [];
-        foreach (var id in ids)
-        {
-            var record = await GetTokenAsync(id, cancellationToken);
-            if (record is null || string.IsNullOrWhiteSpace(record.TokenHash))
-                continue;
+        var lookupHash = HashTokenForLookup(normalizedToken);
+        var matchedId = await _cache.GetAsync<string>(TokenLookupKey(lookupHash), cancellationToken);
+        if (string.IsNullOrWhiteSpace(matchedId))
+            return ApiTokenValidationResult.Invalid(InvalidTokenReason);
 
-            if (VerifyTokenHash(normalizedToken, record.TokenHash))
-            {
-                matchedRecord = record;
-            }
+        var matchedRecord = await GetTokenAsync(matchedId, cancellationToken);
+        if (matchedRecord is null ||
+            string.IsNullOrWhiteSpace(matchedRecord.TokenHash) ||
+            !VerifyTokenHash(normalizedToken, matchedRecord.TokenHash))
+        {
+            return ApiTokenValidationResult.Invalid(InvalidTokenReason);
         }
 
-        if (matchedRecord is not null &&
-            matchedRecord.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase) &&
+        if (matchedRecord.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase) &&
             matchedRecord.ExpiresAt > DateTimeOffset.UtcNow)
         {
             return new ApiTokenValidationResult(
@@ -330,7 +365,19 @@ public sealed class TokenService
             if (ttl > TimeSpan.Zero)
             {
                 await _cache.SetAsync(TokenHashKey(token.TokenHash), token.Id, ttl, cancellationToken);
+                if (!string.IsNullOrWhiteSpace(token.TokenLookupHash))
+                {
+                    await _cache.SetAsync(TokenLookupKey(token.TokenLookupHash), token.Id, ttl, cancellationToken);
+                }
             }
+        }
+    }
+
+    private async Task RemoveTokenLookupAsync(ApiTokenRecord token, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(token.TokenLookupHash))
+        {
+            await _cache.RemoveAsync(TokenLookupKey(token.TokenLookupHash), cancellationToken);
         }
     }
 
@@ -379,12 +426,66 @@ public sealed class TokenService
         }
     }
 
+    private static string HashTokenForLookup(string token)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+        return Base64UrlEncode(hash);
+    }
+
+    private IReadOnlyList<JwksKey> GetJwksKeys()
+    {
+        if (_jwksExpiresAt > DateTimeOffset.UtcNow)
+            return _jwksKeys;
+
+        lock (_jwksLock)
+        {
+            if (_jwksExpiresAt > DateTimeOffset.UtcNow)
+                return _jwksKeys;
+
+            var authority = _keycloakOptions.Value.Authority.TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(authority))
+                return [];
+
+            var jwksUrl = $"{authority}/protocol/openid-connect/certs";
+            var response = _httpClient.GetFromJsonAsync<JsonElement>(jwksUrl).GetAwaiter().GetResult();
+            var keys = new List<JwksKey>();
+
+            if (response.TryGetProperty("keys", out var keyArray) && keyArray.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var key in keyArray.EnumerateArray())
+                {
+                    var kty = key.TryGetProperty("kty", out var ktyProp) ? ktyProp.GetString() : null;
+                    var n = key.TryGetProperty("n", out var nProp) ? nProp.GetString() : null;
+                    var e = key.TryGetProperty("e", out var eProp) ? eProp.GetString() : null;
+
+                    if (!string.Equals(kty, "RSA", StringComparison.OrdinalIgnoreCase) ||
+                        string.IsNullOrWhiteSpace(n) ||
+                        string.IsNullOrWhiteSpace(e))
+                    {
+                        continue;
+                    }
+
+                    var kid = key.TryGetProperty("kid", out var kidProp) ? kidProp.GetString() : null;
+                    keys.Add(new JwksKey(kid, n, e));
+                }
+            }
+
+            _jwksKeys = keys;
+            _jwksExpiresAt = DateTimeOffset.UtcNow.Add(JwksCacheTtl);
+            return _jwksKeys;
+        }
+    }
+
     private static string Base64UrlEncode(ReadOnlySpan<byte> bytes) =>
         Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static string TokenKey(string id) => $"erphub:api-tokens:{id}";
 
     private static string TokenHashKey(string hash) => $"erphub:api-tokens:hash:{hash}";
+
+    private static string TokenLookupKey(string hash) => $"erphub:api-tokens:lookup:{hash}";
+
+    private sealed record JwksKey(string? Kid, string N, string E);
 }
 
 public sealed record TokenRefreshResult(string AccessToken, string? RefreshToken);
@@ -419,6 +520,7 @@ public sealed record ApiTokenRecord
     public IReadOnlyList<string> Permissions { get; init; } = [];
     public string Status { get; init; } = ApiTokenStatuses.Active;
     public string TokenHash { get; init; } = string.Empty;
+    public string TokenLookupHash { get; init; } = string.Empty;
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset ExpiresAt { get; init; }
     public DateTimeOffset? RotatedAt { get; init; }
