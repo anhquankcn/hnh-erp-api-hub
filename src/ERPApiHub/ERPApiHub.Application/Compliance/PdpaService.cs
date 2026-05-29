@@ -218,22 +218,3 @@ public sealed class ConsentGrantedEvent
     public DateTimeOffset? ExpiresAt { get; set; }
     public List<string> Doctypes { get; set; } = [];
 }
-
-public sealed class ConsentWithdrawnEvent
-{
-    public required string EventId { get; set; }
-    public required string TenantId { get; set; }
-    public required string DataSubjectId { get; set; }
-    public required string Purpose { get; set; }
-    public DateTimeOffset WithdrawnAt { get; set; }
-    public string? Reason { get; set; }
-}
-
-public sealed class DataErasureRequestedEvent
-{
-    public required string EventId { get; set; }
-    public required string TenantId { get; set; }
-    public required string DataSubjectId { get; set; }
-    public required string Reason { get; set; }
-    public DateTimeOffset RequestedAt { get; set; }
-}

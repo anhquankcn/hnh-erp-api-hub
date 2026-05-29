@@ -161,12 +161,12 @@ public sealed class LinkFieldValidator(
                 $"resource/DocField?filters=[[\"parent\",\"=\",\"{Uri.EscapeDataString(doctype)}\"],[\"fieldtype\",\"=\",\"Link\"]]&fields=[\"fieldname\",\"options\"]",
                 ct);
 
-            if (!response.IsSuccessStatusCode || response.Data is null)
+            if (!response.IsSuccessStatusCode)
             {
                 return null;
             }
 
-            var schema = ParseSchema(response.Data.Value);
+            var schema = ParseSchema(response.Data);
             await cache.SetAsync(cacheKey, schema, SchemaCacheTtl, ct);
             return schema;
         }
