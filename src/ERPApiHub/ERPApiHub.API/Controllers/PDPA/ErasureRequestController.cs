@@ -1,6 +1,7 @@
 using ERPApiHub.API.DTOs.PDPA;
 using ERPApiHub.Application.Compliance;
 using ERPApiHub.Application.Errors;
+using ERPApiHub.Domain.Entities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -35,7 +36,7 @@ public sealed class ErasureRequestController(PdpaService pdpaService) : Controll
             request.Reason ?? "User requested data erasure",
             cancellationToken);
 
-        var response = MapToResponse(erasureRequest);
+        var response = MapToResponse(erasureRequest, request.RequestedDoctypes);
         return Created($"/api/v2/erasure/{erasureRequest.Id}", response);
     }
 
@@ -67,9 +68,9 @@ public sealed class ErasureRequestController(PdpaService pdpaService) : Controll
             Id = request.Id.ToString("N"),
             SubjectId = request.DataSubjectId,
             Status = request.Status,
+            RequestedDoctypes = [],
             RequestedAt = request.RequestedAt,
-            CompletedAt = request.CompletedAt,
-            Notes = request.Notes
+            CompletedAt = request.CompletedAt
         });
     }
 
@@ -86,32 +87,29 @@ public sealed class ErasureRequestController(PdpaService pdpaService) : Controll
         var tenantId = GetTenantId();
         var requests = await pdpaService.GetErasureRequestsBySubjectAsync(tenantId, subjectId, cancellationToken);
 
-        return Ok(requests.Select(MapToResponse));
+        return Ok(requests.Select(request => new ErasureStatusResponse
+        {
+            Id = request.Id.ToString("N"),
+            SubjectId = request.DataSubjectId,
+            Status = request.Status,
+            RequestedDoctypes = [],
+            RequestedAt = request.RequestedAt,
+            CompletedAt = request.CompletedAt
+        }));
     }
 
-    private static ErasureRequestResponse MapToResponse(ErasureRequest request)
+    private static ErasureRequestResponse MapToResponse(
+        ErasureRequest request,
+        IReadOnlyList<string> requestedDoctypes)
     {
         return new ErasureRequestResponse
         {
             Id = request.Id.ToString("N"),
             SubjectId = request.DataSubjectId,
+            Reason = request.Notes ?? string.Empty,
+            RequestedDoctypes = requestedDoctypes,
             Status = request.Status,
-            RequestedAt = request.RequestedAt,
-            CompletedAt = request.CompletedAt,
-            Notes = request.Notes
-        };
-    }
-
-    private static ErasureStatusResponse MapToResponse(ErasureRequest request)
-    {
-        return new ErasureStatusResponse
-        {
-            Id = request.Id.ToString("N"),
-            SubjectId = request.DataSubjectId,
-            Status = request.Status,
-            RequestedAt = request.RequestedAt,
-            CompletedAt = request.CompletedAt,
-            Notes = request.Notes
+            RequestedAt = request.RequestedAt
         };
     }
 

@@ -25,7 +25,7 @@ public sealed class RateLimitMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        var rateLimitService = context.RequestServices.GetRequiredService<RateLimitService>();
+        var rateLimiter = context.RequestServices.GetRequiredService<IRateLimiter>();
         var options = context.RequestServices.GetRequiredService<IOptions<RateLimitOptions>>().Value;
         var cacheService = context.RequestServices.GetRequiredService<ICacheService>();
         var repository = context.RequestServices.GetRequiredService<IErpHubRepository>();
@@ -68,7 +68,7 @@ public sealed class RateLimitMiddleware
 
                 if (cached is not null)
                 {
-                    tier = rateLimitService.ResolveTier(cached.RateLimitTier);
+                    tier = rateLimiter.ResolveTier(cached.RateLimitTier);
                     systemId = cached.SystemId;
                     tierResolvedFromCache = true;
                 }
@@ -90,7 +90,7 @@ public sealed class RateLimitMiddleware
 
                     if (system is not null)
                     {
-                        tier = rateLimitService.ResolveTier(system.RateLimitTier);
+                        tier = rateLimiter.ResolveTier(system.RateLimitTier);
                         systemId = system.SystemId;
 
                         try
@@ -118,7 +118,7 @@ public sealed class RateLimitMiddleware
         var endpointType = ClassifyEndpoint(path);
 
         // Check rate limit
-        var result = await rateLimitService.CheckAsync(systemId, tier, endpointType, context.RequestAborted);
+        var result = await rateLimiter.CheckAsync(systemId, tier, endpointType, context.RequestAborted);
 
         // Set rate limit headers on all responses
         context.Response.Headers["X-RateLimit-Limit"] = result.Limit.ToString();
@@ -140,7 +140,7 @@ public sealed class RateLimitMiddleware
             return;
         }
 
-        var burstResult = await rateLimitService.CheckBurstAsync(systemId, tier, context.RequestAborted);
+        var burstResult = await rateLimiter.CheckBurstAsync(systemId, tier, context.RequestAborted);
         if (!burstResult)
         {
             var problem = ProblemDetailsHelper.RateLimited(

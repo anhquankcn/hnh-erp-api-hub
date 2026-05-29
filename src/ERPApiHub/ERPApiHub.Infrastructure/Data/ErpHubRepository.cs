@@ -4,50 +4,50 @@ using Microsoft.EntityFrameworkCore;
 
 namespace ERPApiHub.Infrastructure.Data;
 
-public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubRepository
+public sealed class ErpHubRepository(ErpHubDbContext _db) : IErpHubRepository
 {
     public async Task<ExternalSystem?> GetExternalSystemAsync(string id, CancellationToken cancellationToken = default) =>
-        await dbContext.ExternalSystems.FirstOrDefaultAsync(x => x.SystemId == id, cancellationToken);
+        await _db.ExternalSystems.FirstOrDefaultAsync(x => x.SystemId == id, cancellationToken);
 
     public async Task<ExternalSystem?> GetExternalSystemByApiKeyAsync(string apiKeyHash, CancellationToken cancellationToken = default) =>
-        await dbContext.ExternalSystems
+        await _db.ExternalSystems
             .Include(x => x.ApiKeyMappings)
             .FirstOrDefaultAsync(x => x.ApiKeyMappings.Any(m => m.KeycloakUserId == apiKeyHash), cancellationToken);
 
     public async Task<IReadOnlyList<ExternalSystem>> GetExternalSystemsByTenantAsync(string tenantId, CancellationToken cancellationToken = default) =>
-        await dbContext.ExternalSystems
+        await _db.ExternalSystems
             .Where(x => x.TenantId == tenantId)
             .OrderByDescending(x => x.CreatedAt)
             .ToListAsync(cancellationToken);
 
     public async Task<ExternalSystem> CreateExternalSystemAsync(ExternalSystem system, CancellationToken cancellationToken = default)
     {
-        dbContext.ExternalSystems.Add(system);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.ExternalSystems.Add(system);
+        await _db.SaveChangesAsync(cancellationToken);
         return system;
     }
 
     public async Task UpdateExternalSystemAsync(ExternalSystem system, CancellationToken cancellationToken = default)
     {
-        dbContext.ExternalSystems.Update(system);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.ExternalSystems.Update(system);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task DeleteExternalSystemAsync(string id, CancellationToken cancellationToken = default)
     {
-        var system = await dbContext.ExternalSystems.FindAsync([id], cancellationToken)
+        var system = await _db.ExternalSystems.FindAsync([id], cancellationToken)
             ?? throw new KeyNotFoundException($"External system {id} not found");
 
         system.DeletedAt = DateTimeOffset.UtcNow;
         system.IsActive = false;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<TenantRegistry?> GetTenantRegistryAsync(string tenantId, CancellationToken cancellationToken = default) =>
-        await dbContext.TenantRegistries.FirstOrDefaultAsync(x => x.TenantId == tenantId, cancellationToken);
+        await _db.TenantRegistries.FirstOrDefaultAsync(x => x.TenantId == tenantId, cancellationToken);
 
     public async Task<TenantRegistry?> GetTenantRegistryByBranchIdAsync(string branchId, CancellationToken cancellationToken = default) =>
-        await dbContext.TenantRegistries.FirstOrDefaultAsync(x => x.TenantId == branchId, cancellationToken);
+        await _db.TenantRegistries.FirstOrDefaultAsync(x => x.TenantId == branchId, cancellationToken);
 
     public async Task UpdateTenantHealthAsync(
         string tenantId,
@@ -55,40 +55,40 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
         DateTimeOffset? lastHealthCheck = null,
         CancellationToken cancellationToken = default)
     {
-        var tenant = await dbContext.TenantRegistries.FindAsync([tenantId], cancellationToken)
+        var tenant = await _db.TenantRegistries.FindAsync([tenantId], cancellationToken)
             ?? throw new KeyNotFoundException($"Tenant {tenantId} not found");
 
         tenant.HealthStatus = healthStatus;
         tenant.LastHealthCheck = lastHealthCheck ?? DateTimeOffset.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<TenantRegistry> CreateTenantRegistryAsync(TenantRegistry tenant, CancellationToken cancellationToken = default)
     {
-        dbContext.TenantRegistries.Add(tenant);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.TenantRegistries.Add(tenant);
+        await _db.SaveChangesAsync(cancellationToken);
         return tenant;
     }
 
     public async Task<IReadOnlyList<TenantRegistry>> ListTenantRegistriesAsync(CancellationToken cancellationToken = default) =>
-        await dbContext.TenantRegistries.OrderBy(x => x.SiteName).ToListAsync(cancellationToken);
+        await _db.TenantRegistries.OrderBy(x => x.SiteName).ToListAsync(cancellationToken);
 
     public async Task<IReadOnlyList<TenantRegistry>> ListTenantRegistriesAsync(bool onlyActive, CancellationToken cancellationToken = default) =>
-        await dbContext.TenantRegistries
+        await _db.TenantRegistries
             .Where(x => !onlyActive || x.IsActive)
             .OrderBy(x => x.SiteName)
             .ToListAsync(cancellationToken);
 
     public async Task<ApiKeyMapping?> GetApiKeyMappingAsync(string systemId, CancellationToken cancellationToken = default) =>
-        await dbContext.ApiKeyMappings.FirstOrDefaultAsync(x => x.SystemId == systemId && x.IsActive, cancellationToken);
+        await _db.ApiKeyMappings.FirstOrDefaultAsync(x => x.SystemId == systemId && x.IsActive, cancellationToken);
 
     public async Task<IReadOnlyList<FieldMapping>> GetFieldMappingsAsync(string systemId, CancellationToken cancellationToken = default) =>
-        await dbContext.FieldMappings.Where(x => x.SystemId == systemId).ToListAsync(cancellationToken);
+        await _db.FieldMappings.Where(x => x.SystemId == systemId).ToListAsync(cancellationToken);
 
     public async Task<AuditLog> CreateAuditLogAsync(AuditLog log, CancellationToken cancellationToken = default)
     {
-        dbContext.AuditLogs.Add(log);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.AuditLogs.Add(log);
+        await _db.SaveChangesAsync(cancellationToken);
         return log;
     }
 
@@ -125,7 +125,7 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
         string sortDirection = "desc",
         CancellationToken cancellationToken = default)
     {
-        var query = dbContext.AuditLogs.AsNoTracking().AsQueryable();
+        var query = _db.AuditLogs.AsNoTracking().AsQueryable();
 
         if (!string.IsNullOrWhiteSpace(tenantId))
         {
@@ -193,64 +193,64 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
     }
 
     public async Task<WebhookSubscription?> GetWebhookSubscriptionAsync(string id, CancellationToken cancellationToken = default) =>
-        await dbContext.WebhookSubscriptions.FirstOrDefaultAsync(x => x.SubscriptionId == id && x.DeletedAt == null, cancellationToken);
+        await _db.WebhookSubscriptions.FirstOrDefaultAsync(x => x.SubscriptionId == id && x.DeletedAt == null, cancellationToken);
 
     public async Task<IReadOnlyList<WebhookSubscription>> GetWebhookSubscriptionsBySystemAsync(string systemId, CancellationToken cancellationToken = default) =>
-        await dbContext.WebhookSubscriptions
+        await _db.WebhookSubscriptions
             .Where(x => x.SystemId == systemId && x.IsActive)
             .OrderByDescending(x => x.CreatedAt)
             .ToListAsync(cancellationToken);
 
     public async Task<IReadOnlyList<WebhookSubscription>> GetWebhookSubscriptionsByTenantAsync(string tenantId, CancellationToken cancellationToken = default) =>
-        await dbContext.WebhookSubscriptions
+        await _db.WebhookSubscriptions
             .Include(x => x.ExternalSystem)
             .Where(x => x.ExternalSystem != null && x.ExternalSystem.TenantId == tenantId && x.IsActive)
             .OrderByDescending(x => x.CreatedAt)
             .ToListAsync(cancellationToken);
 
     public async Task<IReadOnlyList<WebhookSubscription>> GetMatchingWebhookSubscriptionsAsync(string eventType, CancellationToken cancellationToken = default) =>
-        await dbContext.WebhookSubscriptions
+        await _db.WebhookSubscriptions
             .Where(x => x.IsActive && x.EventTypes.Contains(eventType))
             .ToListAsync(cancellationToken);
 
     public async Task<WebhookSubscription> CreateWebhookSubscriptionAsync(WebhookSubscription subscription, CancellationToken cancellationToken = default)
     {
-        dbContext.WebhookSubscriptions.Add(subscription);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.WebhookSubscriptions.Add(subscription);
+        await _db.SaveChangesAsync(cancellationToken);
         return subscription;
     }
 
     public async Task UpdateWebhookSubscriptionAsync(WebhookSubscription subscription, CancellationToken cancellationToken = default)
     {
-        dbContext.WebhookSubscriptions.Update(subscription);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.WebhookSubscriptions.Update(subscription);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task DeleteWebhookSubscriptionAsync(string id, CancellationToken cancellationToken = default)
     {
-        var subscription = await dbContext.WebhookSubscriptions.FindAsync([id], cancellationToken)
+        var subscription = await _db.WebhookSubscriptions.FindAsync([id], cancellationToken)
             ?? throw new KeyNotFoundException($"Subscription {id} not found");
 
         subscription.DeletedAt = DateTimeOffset.UtcNow;
         subscription.IsActive = false;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<WebhookDelivery> CreateWebhookDeliveryAsync(WebhookDelivery delivery, CancellationToken cancellationToken = default)
     {
-        dbContext.WebhookDeliveries.Add(delivery);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.WebhookDeliveries.Add(delivery);
+        await _db.SaveChangesAsync(cancellationToken);
         return delivery;
     }
 
     public async Task UpdateWebhookDeliveryAsync(WebhookDelivery delivery, CancellationToken cancellationToken = default)
     {
-        dbContext.WebhookDeliveries.Update(delivery);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.WebhookDeliveries.Update(delivery);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<IReadOnlyList<WebhookDelivery>> GetWebhookDeliveriesAsync(string subscriptionId, int page = 1, int pageSize = 50, CancellationToken cancellationToken = default) =>
-        await dbContext.WebhookDeliveries
+        await _db.WebhookDeliveries
             .Where(x => x.SubscriptionId == subscriptionId)
             .OrderByDescending(x => x.AttemptedAt)
             .Skip((page - 1) * pageSize)
@@ -258,16 +258,16 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
             .ToListAsync(cancellationToken);
 
     public async Task<ErpProcessedEvent?> GetProcessedEventAsync(string eventId, CancellationToken cancellationToken = default) =>
-        await dbContext.ErpProcessedEvents.FirstOrDefaultAsync(x => x.ErpProcessedEventId == eventId, cancellationToken);
+        await _db.ErpProcessedEvents.FirstOrDefaultAsync(x => x.ErpProcessedEventId == eventId, cancellationToken);
 
     public async Task CreateProcessedEventAsync(ErpProcessedEvent evt, CancellationToken cancellationToken = default)
     {
-        dbContext.ErpProcessedEvents.Add(evt);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.ErpProcessedEvents.Add(evt);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<IReadOnlyList<AuditLog>> GetAuditLogsOlderThanAsync(DateTimeOffset cutoff, int limit, CancellationToken cancellationToken = default) =>
-        await dbContext.AuditLogs
+        await _db.AuditLogs
             .Where(x => x.CreatedAt < cutoff && x.ArchiveStatus == null)
             .OrderBy(x => x.CreatedAt)
             .Take(limit)
@@ -275,7 +275,7 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
 
     public async Task MarkAuditLogsArchivingAsync(IReadOnlyList<string> ids, DateTimeOffset claimedAt, CancellationToken cancellationToken = default)
     {
-        var logs = await dbContext.AuditLogs
+        var logs = await _db.AuditLogs
             .Where(x => ids.Contains(x.LogId) && x.ArchiveStatus == null)
             .ToListAsync(cancellationToken);
 
@@ -285,12 +285,12 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
             log.ArchiveClaimedAt = claimedAt;
         }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task ClearAuditLogsArchivingAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default)
     {
-        var logs = await dbContext.AuditLogs
+        var logs = await _db.AuditLogs
             .Where(x => ids.Contains(x.LogId) && x.ArchiveStatus == "archiving")
             .ToListAsync(cancellationToken);
 
@@ -300,27 +300,27 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
             log.ArchiveClaimedAt = null;
         }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public async Task<int> CountAuditLogsAsync(CancellationToken cancellationToken = default) =>
-        await dbContext.AuditLogs.CountAsync(cancellationToken);
+        await _db.AuditLogs.CountAsync(cancellationToken);
 
     public async Task<int> CountAuditLogsOlderThanAsync(DateTimeOffset cutoff, CancellationToken cancellationToken = default) =>
-        await dbContext.AuditLogs.CountAsync(x => x.CreatedAt < cutoff && x.ArchiveStatus == null, cancellationToken);
+        await _db.AuditLogs.CountAsync(x => x.CreatedAt < cutoff && x.ArchiveStatus == null, cancellationToken);
 
     public async Task DeleteAuditLogsAsync(IReadOnlyList<string> ids, CancellationToken cancellationToken = default)
     {
-        var logs = await dbContext.AuditLogs
+        var logs = await _db.AuditLogs
             .Where(x => ids.Contains(x.LogId))
             .ToListAsync(cancellationToken);
 
-        dbContext.AuditLogs.RemoveRange(logs);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        _db.AuditLogs.RemoveRange(logs);
+        await _db.SaveChangesAsync(cancellationToken);
     }
 
     public Task<int> SaveChangesAsync(CancellationToken cancellationToken = default) =>
-        dbContext.SaveChangesAsync(cancellationToken);
+        _db.SaveChangesAsync(cancellationToken);
 
     private static IOrderedQueryable<AuditLog> ApplyAuditLogOrdering(
         IQueryable<AuditLog> query,
@@ -349,14 +349,14 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
     // PDPA Compliance Methods
     public async Task<ConsentRecord?> GetConsentAsync(string tenantId, string dataSubjectId, string purpose, CancellationToken cancellationToken = default)
     {
-        return await _dbContext.ConsentRecords
+        return await _db.ConsentRecords
             .AsNoTracking()
             .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.DataSubjectId == dataSubjectId && c.Purpose == purpose && c.IsActive, cancellationToken);
     }
 
     public async Task<IReadOnlyList<ConsentRecord>> GetConsentsBySubjectAsync(string tenantId, string dataSubjectId, CancellationToken cancellationToken = default)
     {
-        return await _dbContext.ConsentRecords
+        return await _db.ConsentRecords
             .AsNoTracking()
             .Where(c => c.TenantId == tenantId && c.DataSubjectId == dataSubjectId)
             .OrderByDescending(c => c.CreatedAt)
@@ -365,28 +365,28 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
 
     public async Task<ConsentRecord> CreateConsentAsync(ConsentRecord consent, CancellationToken cancellationToken = default)
     {
-        _dbContext.ConsentRecords.Add(consent);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        _db.ConsentRecords.Add(consent);
+        await _db.SaveChangesAsync(cancellationToken);
         return consent;
     }
 
     public async Task<ConsentRecord> UpdateConsentAsync(ConsentRecord consent, CancellationToken cancellationToken = default)
     {
-        _dbContext.ConsentRecords.Update(consent);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        _db.ConsentRecords.Update(consent);
+        await _db.SaveChangesAsync(cancellationToken);
         return consent;
     }
 
     public async Task<ErasureRequest?> GetErasureRequestAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        return await _dbContext.ErasureRequests
+        return await _db.ErasureRequests
             .AsNoTracking()
             .FirstOrDefaultAsync(e => e.Id == id, cancellationToken);
     }
 
     public async Task<IReadOnlyList<ErasureRequest>> GetErasureRequestsBySubjectAsync(string tenantId, string dataSubjectId, CancellationToken cancellationToken = default)
     {
-        return await _dbContext.ErasureRequests
+        return await _db.ErasureRequests
             .AsNoTracking()
             .Where(e => e.TenantId == tenantId && e.DataSubjectId == dataSubjectId)
             .OrderByDescending(e => e.RequestedAt)
@@ -395,15 +395,15 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
 
     public async Task<ErasureRequest> CreateErasureRequestAsync(ErasureRequest request, CancellationToken cancellationToken = default)
     {
-        _dbContext.ErasureRequests.Add(request);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        _db.ErasureRequests.Add(request);
+        await _db.SaveChangesAsync(cancellationToken);
         return request;
     }
 
     public async Task<ErasureRequest> UpdateErasureRequestAsync(ErasureRequest request, CancellationToken cancellationToken = default)
     {
-        _dbContext.ErasureRequests.Update(request);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+        _db.ErasureRequests.Update(request);
+        await _db.SaveChangesAsync(cancellationToken);
         return request;
     }
 }

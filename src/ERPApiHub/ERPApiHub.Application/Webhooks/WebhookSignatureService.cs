@@ -12,6 +12,16 @@ public sealed class WebhookSignatureService
         return $"sha256={Convert.ToHexString(hash).ToLowerInvariant()}";
     }
 
+    public string ComputeDeliverySignature(
+        string payload,
+        byte[] secret,
+        DateTimeOffset timestamp,
+        string deliveryId)
+    {
+        var signedPayload = $"{timestamp.ToUnixTimeSeconds()}.{deliveryId}.{payload}";
+        return ComputeSignature(signedPayload, secret);
+    }
+
     public bool ValidateSignature(string payload, byte[] secret, string signature)
     {
         var expected = ComputeSignature(payload, secret);

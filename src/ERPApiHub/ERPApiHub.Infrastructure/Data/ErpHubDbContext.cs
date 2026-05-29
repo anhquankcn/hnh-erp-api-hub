@@ -296,6 +296,8 @@ public sealed class ErpHubDbContext(DbContextOptions<ErpHubDbContext> options, I
                     entry.Entity.UpdatedBy = userId;
             }
         }
+    }
+
     private static void ConfigureConsentRecords(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<ConsentRecord>(entity =>

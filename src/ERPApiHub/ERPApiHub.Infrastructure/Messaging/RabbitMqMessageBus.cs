@@ -23,7 +23,18 @@ public sealed class RabbitMqMessageBus(
         var targetExchange = string.IsNullOrWhiteSpace(exchange) ? rabbitMqOptions.ExchangeName : exchange;
 
         await using var connection = await connectionFactory.CreateConnectionAsync(cancellationToken);
-        await using var channel = await connection.CreateChannelAsync(cancellationToken: cancellationToken);
+        await using var channel = await connection.CreateChannelAsync(
+            new CreateChannelOptions(
+                publisherConfirmationsEnabled: true,
+                publisherConfirmationTrackingEnabled: true),
+            cancellationToken);
+
+        await channel.ExchangeDeclareAsync(
+            targetExchange,
+            ExchangeType.Topic,
+            durable: true,
+            autoDelete: false,
+            cancellationToken: cancellationToken);
 
         var body = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message, SerializerOptions));
         var properties = new BasicProperties

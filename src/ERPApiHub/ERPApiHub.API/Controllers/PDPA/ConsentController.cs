@@ -1,6 +1,7 @@
 using ERPApiHub.API.DTOs.PDPA;
 using ERPApiHub.Application.Compliance;
 using ERPApiHub.Application.Errors;
+using ERPApiHub.Domain.Entities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -14,8 +15,6 @@ namespace ERPApiHub.API.Controllers.PDPA;
 [Authorize]
 public sealed class ConsentController(PdpaService pdpaService) : ControllerBase
 {
-    private static readonly TimeSpan RateLimitWindow = TimeSpan.FromMinutes(1);
-
     /// <summary>
     /// Submit consent for a data subject.
     /// </summary>
@@ -36,7 +35,7 @@ public sealed class ConsentController(PdpaService pdpaService) : ControllerBase
             tenantId,
             request.SubjectId,
             request.Purpose,
-            request.Doctypes ?? [],
+            request.Doctypes.ToList(),
             request.Notes,
             request.ExpiryDate,
             cancellationToken);
@@ -87,15 +86,15 @@ public sealed class ConsentController(PdpaService pdpaService) : ControllerBase
         var tenantId = GetTenantId();
 
         var consents = await pdpaService.GetConsentsBySubjectAsync(tenantId, subjectId, cancellationToken);
-        var activeConsents = consents.Where(c => c.IsActive).ToList();
+        var filteredConsents = string.IsNullOrWhiteSpace(purpose)
+            ? consents
+            : consents.Where(c => string.Equals(c.Purpose, purpose, StringComparison.OrdinalIgnoreCase)).ToList();
 
         return Ok(new ConsentStatusResponse
         {
             SubjectId = subjectId,
-            HasActiveConsent = activeConsents.Count > 0,
-            Purposes = activeConsents.Select(c => c.Purpose).ToList(),
-            LastGrantedAt = activeConsents.MaxBy(c => c.GrantedAt)?.GrantedAt,
-            Count = activeConsents.Count
+            HasActiveConsent = filteredConsents.Any(c => c.IsActive),
+            Consents = filteredConsents.Select(MapToResponse).ToList()
         });
     }
 

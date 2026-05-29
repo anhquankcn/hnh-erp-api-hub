@@ -19,4 +19,10 @@ public class ErpNextEventOptions
 
     /// <summary>Whether to explicitly skip signature validation for local testing.</summary>
     public bool SkipSignatureValidation { get; set; } = false;
+
+    /// <summary>
+    /// CIDR ranges or exact IP addresses allowed to call the internal ERPNext event endpoint.
+    /// Empty means loopback only.
+    /// </summary>
+    public string[] AllowedIpRanges { get; set; } = ["127.0.0.1/32", "::1/128"];
 }

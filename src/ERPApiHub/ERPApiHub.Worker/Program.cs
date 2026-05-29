@@ -1,6 +1,7 @@
 using System.Text.Json;
 using ERPApiHub.Application.HealthChecks;
 using ERPApiHub.Application.Polling;
+using ERPApiHub.Application.Webhooks;
 using ERPApiHub.Infrastructure;
 using ERPApiHub.Infrastructure.Data;
 using ERPApiHub.Infrastructure.Health;
@@ -17,12 +18,25 @@ builder.Services.Configure<TenantHealthCheckOptions>(builder.Configuration.GetSe
 builder.Services.Configure<LinkFieldValidationOptions>(
     builder.Configuration.GetSection(LinkFieldValidationOptions.SectionName));
 builder.Services.Configure<PollingOptions>(builder.Configuration.GetSection(PollingOptions.SectionName));
+builder.Services.Configure<MockErpEventGeneratorOptions>(
+    builder.Configuration.GetSection(MockErpEventGeneratorOptions.SectionName));
+builder.Services.Configure<WebhookDispatcherOptions>(
+    builder.Configuration.GetSection(WebhookDispatcherOptions.SectionName));
 builder.Services.AddSingleton<DoctypePollingRegistry>();
 builder.Services.AddScoped<TenantHealthCheckService>();
 builder.Services.AddScoped<LinkFieldValidator>();
+builder.Services.AddScoped<WebhookSignatureService>();
+builder.Services.AddSingleton<WebhookEndpointValidator>();
+builder.Services.AddScoped<WebhookDispatcherService>();
+builder.Services.AddSingleton<ERPApiHub.Application.Cache.CacheStampedeGuard>();
+builder.Services.AddScoped<ERPApiHub.Application.Cache.CacheInvalidationService>();
+builder.Services.AddHttpClient("WebhookDelivery");
 builder.Services.AddHostedService<ErpIngestionConsumer>();
+builder.Services.AddHostedService<WebhookDispatcherConsumer>();
+builder.Services.AddHostedService<CacheInvalidationWorker>();
 builder.Services.AddHostedService<PollingWorker>();
 builder.Services.AddHostedService<TenantHealthCheckWorker>();
+builder.Services.AddHostedService<MockErpEventGenerator>();
 builder.Services
     .AddHealthChecks()
     .AddDbContextCheck<ErpHubDbContext>("postgres", tags: ["ready", "startup"])

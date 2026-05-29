@@ -11,6 +11,7 @@ using ERPApiHub.Application.Ingestion;
 using ERPApiHub.Application.Observability;
 using ERPApiHub.Application.Query;
 using ERPApiHub.Application.RateLimiting;
+using ERPApiHub.Application.Validation;
 using ERPApiHub.Application.Webhooks;
 using ERPApiHub.API.Middleware;
 using ERPApiHub.Infrastructure;
@@ -69,6 +70,8 @@ builder.Services.AddOpenTelemetry()
 builder.Services.Configure<CacheOptions>(builder.Configuration.GetSection(CacheOptions.SectionName));
 builder.Services.AddSingleton<CacheService>();
 builder.Services.AddSingleton<ApplicationCacheService>(sp => sp.GetRequiredService<CacheService>());
+builder.Services.AddSingleton<ERPApiHub.Application.Cache.CacheStampedeGuard>();
+builder.Services.AddScoped<ERPApiHub.Application.Cache.CacheInvalidationService>();
 builder.Services.AddScoped<CacheInvalidationService>();
 
 // S4-004: Hangfire background jobs
@@ -103,8 +106,11 @@ builder.Services.AddScoped<AuditService>();
 builder.Services.AddScoped<AuditSearchService>();
 builder.Services.AddSingleton<PiiMaskingService>();
 builder.Services.AddScoped<WebhookSignatureService>();
+builder.Services.AddSingleton<WebhookEndpointValidator>();
 builder.Services.AddScoped<WebhookSubscriptionService>();
 builder.Services.AddScoped<WebhookDeliveryService>();
+builder.Services.Configure<WebhookDispatcherOptions>(builder.Configuration.GetSection(WebhookDispatcherOptions.SectionName));
+builder.Services.AddScoped<WebhookDispatcherService>();
 builder.Services.AddHttpClient("WebhookDelivery");
 
 builder.Services.Configure<LinkFieldValidationOptions>(
@@ -124,7 +130,9 @@ builder.Services.AddScoped<DlqManagementService>();
 
 // S3-001: Rate Limiting
 builder.Services.Configure<RateLimitOptions>(builder.Configuration.GetSection(RateLimitOptions.SectionName));
+builder.Services.AddScoped<IRateLimiter, RedisRateLimiter>();
 builder.Services.AddScoped<RateLimitService>();
+builder.Services.AddSingleton<KongConfigGenerator>();
 
 // S3-002: External System Configuration
 builder.Services.AddScoped<ExternalSystemService>();
@@ -164,7 +172,7 @@ builder.Services.AddApiVersioning(options =>
     options.DefaultApiVersion = new ApiVersion(1, 0);
     options.AssumeDefaultVersionWhenUnspecified = true;
     options.ReportApiVersions = true;
-}).AddApiExplorer();
+});
 
 var app = builder.Build();
 
@@ -491,89 +499,6 @@ app.MapGet("/api/v1/audit/logs/export", async (string? tenantId, string? fromDat
     .WithApiVersionSet(apiVersionSet)
     .MapToApiVersion(1, 0)
     .RequireAuthorization("api-hub:admin");
-
-// ─── Webhook Endpoints (S2-006) ───
-
-app.MapPost("/api/v1/webhooks/subscriptions", async (CreateWebhookSubscriptionRequest req, WebhookSubscriptionService service, HttpContext ctx, CancellationToken ct) =>
-{
-    var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
-    var sub = await service.CreateAsync(req.SystemId, req.EventTypes, req.WebhookUrl, req.Secret, tenantId, ct);
-    return Results.Created($"/api/v1/webhooks/subscriptions/{sub.SubscriptionId}", sub);
-})
-    .WithApiVersionSet(apiVersionSet)
-    .MapToApiVersion(1, 0)
-    .RequireAuthorization("api-hub:admin");
-
-app.MapGet("/api/v1/webhooks/subscriptions", async (WebhookSubscriptionService service, HttpContext ctx, CancellationToken ct) =>
-{
-    var tenantId = ctx.User.FindFirst("BranchId")?.Value ?? "unknown";
-    var subs = await service.ListByTenantAsync(tenantId, ct);
-    return Results.Ok(subs);
-})
-    .WithApiVersionSet(apiVersionSet)
-    .MapToApiVersion(1, 0)
-    .RequireAuthorization("api-hub:admin");
-
-app.MapPut("/api/v1/webhooks/subscriptions/{id}", async (string id, UpdateWebhookSubscriptionRequest req, WebhookSubscriptionService service, CancellationToken ct) =>
-{
-    var sub = await service.UpdateAsync(id, req.EventTypes, req.WebhookUrl, req.Secret, ct);
-    return Results.Ok(sub);
-})
-    .WithApiVersionSet(apiVersionSet)
-    .MapToApiVersion(1, 0)
-    .RequireAuthorization("api-hub:admin");
-
-app.MapDelete("/api/v1/webhooks/subscriptions/{id}", async (string id, WebhookSubscriptionService service, CancellationToken ct) =>
-{
-    await service.DeleteAsync(id, ct);
-    return Results.NoContent();
-})
-    .WithApiVersionSet(apiVersionSet)
-    .MapToApiVersion(1, 0)
-    .RequireAuthorization("api-hub:admin");
-
-app.MapGet("/api/v1/webhooks/deliveries/{subscriptionId}", async (string subscriptionId, WebhookDeliveryService service, CancellationToken ct) =>
-{
-    var deliveries = await service.ListDeliveriesAsync(subscriptionId, ct);
-    return Results.Ok(deliveries);
-})
-    .WithApiVersionSet(apiVersionSet)
-    .MapToApiVersion(1, 0)
-    .RequireAuthorization("api-hub:admin");
-
-// ─── ERPNext Event Ingestion Endpoint (S3-003) ───
-
-app.MapPost("/internal/v1/events/ingest", async (HttpContext ctx, ErpNextEventIngestionService service, CancellationToken ct) =>
-{
-    using var reader = new StreamReader(ctx.Request.Body);
-    var rawBody = await reader.ReadToEndAsync(ct);
-    var signatureHeader = ctx.Request.Headers["X-ERP-Hub-Signature-256"].FirstOrDefault() ?? string.Empty;
-
-    if (!service.ValidateSignature(rawBody, signatureHeader))
-    {
-        return Results.Unauthorized();
-    }
-
-    System.Text.Json.JsonElement envelope;
-    try
-    {
-        var doc = System.Text.Json.JsonDocument.Parse(rawBody);
-        envelope = doc.RootElement.Clone();
-    }
-    catch (System.Text.Json.JsonException)
-    {
-        return Results.BadRequest(new { error = "Invalid JSON payload." });
-    }
-
-    var eventType = envelope.TryGetProperty("eventType", out var eventTypeElement)
-        && eventTypeElement.ValueKind == JsonValueKind.String
-        && !string.IsNullOrWhiteSpace(eventTypeElement.GetString())
-            ? eventTypeElement.GetString()!
-            : "erpnext.event";
-
-    await service.IngestEventAsync(eventType, rawBody, null, ct);
-    return Results.Accepted(null, new { status = "accepted" });
-}).AllowAnonymous();
 
 // ─── External System Configuration Endpoints (S3-002) ───
 

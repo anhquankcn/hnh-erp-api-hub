@@ -11,20 +11,29 @@ public sealed class WebhookSubscriptionService
 {
     private readonly IErpHubRepository _repository;
     private readonly IDataProtector _dataProtector;
+    private readonly WebhookEndpointValidator _endpointValidator;
     private readonly ILogger<WebhookSubscriptionService> _logger;
 
     public WebhookSubscriptionService(
         IErpHubRepository repository,
         IDataProtectionProvider dataProtectionProvider,
+        WebhookEndpointValidator endpointValidator,
         ILogger<WebhookSubscriptionService> logger)
     {
         _repository = repository;
         _dataProtector = dataProtectionProvider.CreateProtector("WebhookSecret");
+        _endpointValidator = endpointValidator;
         _logger = logger;
     }
 
     public async Task<WebhookSubscription> CreateAsync(string systemId, string[] eventTypes, string webhookUrl, string? secret, string tenantId, CancellationToken ct)
     {
+        var endpointValidation = await _endpointValidator.ValidateAsync(webhookUrl, ct);
+        if (!endpointValidation.IsValid)
+        {
+            throw new ArgumentException(endpointValidation.Error, nameof(webhookUrl));
+        }
+
         var existing = await _repository.GetWebhookSubscriptionsBySystemAsync(systemId, ct);
         if (existing.Count >= 10)
         {
@@ -66,7 +75,17 @@ public sealed class WebhookSubscriptionService
             ?? throw new KeyNotFoundException($"Subscription {subscriptionId} not found");
 
         if (eventTypes is not null) subscription.EventTypes = eventTypes;
-        if (webhookUrl is not null) subscription.WebhookUrl = webhookUrl;
+        if (webhookUrl is not null)
+        {
+            var endpointValidation = await _endpointValidator.ValidateAsync(webhookUrl, ct);
+            if (!endpointValidation.IsValid)
+            {
+                throw new ArgumentException(endpointValidation.Error, nameof(webhookUrl));
+            }
+
+            subscription.WebhookUrl = webhookUrl;
+        }
+
         if (secret is not null) subscription.SecretEncrypted = _dataProtector.Protect(Encoding.UTF8.GetBytes(secret));
 
         await _repository.UpdateWebhookSubscriptionAsync(subscription, ct);

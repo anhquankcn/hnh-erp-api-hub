@@ -1,33 +1,29 @@
 using System.Text.Json;
-using ERPApiHub.Application.Webhooks;
+using ERPApiHub.Application.Cache;
 using ERPApiHub.Infrastructure.Messaging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
-namespace ERPApiHub.Worker.Consumers;
+namespace ERPApiHub.Worker.Workers;
 
-/// <summary>
-/// Consumes events from erphub.webhook.delivery and delegates delivery behavior
-/// to the Application layer dispatcher.
-/// </summary>
-public sealed class WebhookDispatcherConsumer : BackgroundService
+public sealed class CacheInvalidationWorker : BackgroundService
 {
-    private const string QueueName = "erphub.webhook.delivery";
-    private const string DeadLetterQueueName = "erphub.webhook.dlq";
+    private const string QueueName = "erphub.cache.invalidation";
+    private const string DeadLetterQueueName = "erphub.cache.invalidation.dlq";
 
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IRabbitMqConnectionFactory _connectionFactory;
     private readonly RabbitMqOptions _rabbitMqOptions;
-    private readonly ILogger<WebhookDispatcherConsumer> _logger;
+    private readonly ILogger<CacheInvalidationWorker> _logger;
     private IConnection? _connection;
     private IChannel? _channel;
 
-    public WebhookDispatcherConsumer(
+    public CacheInvalidationWorker(
         IServiceScopeFactory scopeFactory,
         IRabbitMqConnectionFactory connectionFactory,
         IOptions<RabbitMqOptions> rabbitMqOptions,
-        ILogger<WebhookDispatcherConsumer> logger)
+        ILogger<CacheInvalidationWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _connectionFactory = connectionFactory;
@@ -41,14 +37,14 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
         _channel = await _connection.CreateChannelAsync(cancellationToken: stoppingToken);
 
         await _channel.ExchangeDeclareAsync(
-            exchange: _rabbitMqOptions.ExchangeName,
-            type: ExchangeType.Topic,
+            _rabbitMqOptions.ExchangeName,
+            ExchangeType.Topic,
             durable: true,
             autoDelete: false,
             cancellationToken: stoppingToken);
 
         await _channel.QueueDeclareAsync(
-            queue: DeadLetterQueueName,
+            DeadLetterQueueName,
             durable: true,
             exclusive: false,
             autoDelete: false,
@@ -61,7 +57,7 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
         };
 
         await _channel.QueueDeclareAsync(
-            queue: QueueName,
+            QueueName,
             durable: true,
             exclusive: false,
             autoDelete: false,
@@ -69,24 +65,24 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
             cancellationToken: stoppingToken);
 
         await _channel.QueueBindAsync(
-            queue: QueueName,
-            exchange: _rabbitMqOptions.ExchangeName,
-            routingKey: "erphub.webhook.#",
+            QueueName,
+            _rabbitMqOptions.ExchangeName,
+            "erphub.webhook.#",
             cancellationToken: stoppingToken);
 
-        await _channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 4, global: false, cancellationToken: stoppingToken);
+        await _channel.BasicQosAsync(0, 8, false, stoppingToken);
 
         var consumer = new AsyncEventingBasicConsumer(_channel);
-        consumer.ReceivedAsync += async (_, args) => await ProcessDeliveryAsync(args, stoppingToken);
+        consumer.ReceivedAsync += async (_, args) => await ProcessAsync(args, stoppingToken);
 
         await _channel.BasicConsumeAsync(
-            queue: QueueName,
+            QueueName,
             autoAck: false,
-            consumer: consumer,
+            consumer,
             cancellationToken: stoppingToken);
 
         _logger.LogInformation(
-            "Webhook dispatcher consuming from {Queue} bound to {Exchange}",
+            "Cache invalidation worker consuming from {Queue} bound to {Exchange}.",
             QueueName,
             _rabbitMqOptions.ExchangeName);
 
@@ -110,7 +106,7 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
         await base.StopAsync(cancellationToken);
     }
 
-    private async Task ProcessDeliveryAsync(BasicDeliverEventArgs args, CancellationToken cancellationToken)
+    private async Task ProcessAsync(BasicDeliverEventArgs args, CancellationToken cancellationToken)
     {
         if (_channel is null)
         {
@@ -119,31 +115,49 @@ public sealed class WebhookDispatcherConsumer : BackgroundService
 
         try
         {
-            await using var scope = _scopeFactory.CreateAsyncScope();
-            var dispatcher = scope.ServiceProvider.GetRequiredService<WebhookDispatcherService>();
-            var result = await dispatcher.DispatchRawEventAsync(args.Body.ToArray(), cancellationToken);
-
-            if (result.AllDelivered)
+            using var document = JsonDocument.Parse(args.Body.Span);
+            if (!TryExtractDoctype(document.RootElement, out var doctype))
             {
                 await _channel.BasicAckAsync(args.DeliveryTag, false, cancellationToken);
                 return;
             }
 
-            _logger.LogWarning(
-                "Webhook event {EventId} had {Failed} failed deliveries. Dead-lettering message.",
-                result.EventId,
-                result.Failed);
-            await _channel.BasicNackAsync(args.DeliveryTag, false, false, cancellationToken);
+            var tenantId = TryExtractString(document.RootElement, "tenantId")
+                ?? TryExtractString(document.RootElement, "branchId")
+                ?? TryExtractString(document.RootElement, "BranchId");
+
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var invalidationService = scope.ServiceProvider.GetRequiredService<CacheInvalidationService>();
+            await invalidationService.InvalidateDoctypeAsync(doctype, tenantId, cancellationToken);
+
+            await _channel.BasicAckAsync(args.DeliveryTag, false, cancellationToken);
         }
         catch (JsonException ex)
         {
-            _logger.LogWarning(ex, "Invalid webhook event envelope. Dead-lettering message.");
+            _logger.LogWarning(ex, "Invalid cache invalidation event. Dead-lettering message.");
             await _channel.BasicNackAsync(args.DeliveryTag, false, false, cancellationToken);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to process webhook event. Dead-lettering message.");
+            _logger.LogError(ex, "Failed to invalidate cache from webhook event. Dead-lettering message.");
             await _channel.BasicNackAsync(args.DeliveryTag, false, false, cancellationToken);
         }
     }
+
+    private static bool TryExtractDoctype(JsonElement root, out string doctype)
+    {
+        doctype = TryExtractString(root, "doctype")
+            ?? (root.TryGetProperty("payload", out var payload) ? TryExtractString(payload, "doctype") : null)
+            ?? string.Empty;
+
+        return !string.IsNullOrWhiteSpace(doctype);
+    }
+
+    private static string? TryExtractString(JsonElement element, string propertyName) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(propertyName, out var property)
+        && property.ValueKind == JsonValueKind.String
+        && !string.IsNullOrWhiteSpace(property.GetString())
+            ? property.GetString()
+            : null;
 }

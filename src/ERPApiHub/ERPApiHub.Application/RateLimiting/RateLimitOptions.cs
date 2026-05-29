@@ -10,7 +10,7 @@ public class RateLimitOptions
     /// <summary>Whether rate limiting is enabled.</summary>
     public bool Enabled { get; set; } = true;
 
-    /// <summary>Window size in seconds for fixed-window counter.</summary>
+    /// <summary>Window size in seconds for sliding-window counter.</summary>
     public int WindowSeconds { get; set; } = 60;
 
     /// <summary>Default tier for unregistered systems.</summary>

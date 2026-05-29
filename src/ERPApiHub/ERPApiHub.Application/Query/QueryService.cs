@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using ERPApiHub.Application.Abstractions;
+using ERPApiHub.Application.Cache;
 using ERPApiHub.Domain;
 using ERPApiHub.Domain.Entities;
 using Microsoft.AspNetCore.Http;
@@ -14,6 +15,8 @@ public sealed class QueryService
 {
     private readonly IErpNextClient _erpNextClient;
     private readonly ICacheService _cacheService;
+    private readonly CacheStampedeGuard _stampedeGuard;
+    private readonly CacheInvalidationService _cacheInvalidationService;
     private readonly IErpHubRepository _repository;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger<QueryService> _logger;
@@ -21,12 +24,16 @@ public sealed class QueryService
     public QueryService(
         IErpNextClient erpNextClient,
         ICacheService cacheService,
+        CacheStampedeGuard stampedeGuard,
+        CacheInvalidationService cacheInvalidationService,
         IErpHubRepository repository,
         IHttpContextAccessor httpContextAccessor,
         ILogger<QueryService> logger)
     {
         _erpNextClient = erpNextClient;
         _cacheService = cacheService;
+        _stampedeGuard = stampedeGuard;
+        _cacheInvalidationService = cacheInvalidationService;
         _repository = repository;
         _httpContextAccessor = httpContextAccessor;
         _logger = logger;
@@ -46,34 +53,34 @@ public sealed class QueryService
 
         var cacheKey = $"query:{tenantId}:{request.Doctype}:{HashParams(request)}";
 
+        PaginatedResponse<JsonElement> result;
         if (!bypassCache)
         {
-            PaginatedResponse<JsonElement>? cached = await _cacheService.GetAsync<PaginatedResponse<JsonElement>>(cacheKey, cancellationToken);
-            if (cached is not null)
-            {
-                _logger.LogDebug("Cache hit for {CacheKey}", cacheKey);
-                return cached;
-            }
+            result = await _stampedeGuard.ExecuteAsync(
+                cacheKey,
+                async ct =>
+                {
+                    var cached = await _cacheService.GetAsync<PaginatedResponse<JsonElement>>(cacheKey, ct);
+                    if (cached is not null)
+                    {
+                        _logger.LogDebug("Cache hit for {CacheKey}", cacheKey);
+                    }
+
+                    return cached;
+                },
+                async ct =>
+                {
+                    var created = await FetchListAsync(request, tenantId, ct);
+                    var ttl = TimeSpan.FromMinutes(5);
+                    await _cacheService.SetAsync(cacheKey, created, ttl, ct);
+                    await _cacheInvalidationService.RegisterQueryKeyAsync(tenantId, request.Doctype, cacheKey, ttl, ct);
+                    return created;
+                },
+                cancellationToken);
         }
-
-        // Build ERPNext resource path with query params
-        var limitStart = (request.Page - 1) * request.PageSize;
-        var resourcePath = BuildResourcePath(request, limitStart);
-
-        var response = await _erpNextClient.GetAsync<JsonElement>(resourcePath, tenantId, cancellationToken);
-
-        if (response.StatusCode != 200 || response.Data.ValueKind == JsonValueKind.Undefined)
+        else
         {
-            throw new InvalidOperationException($"ERPNext query failed: {response.Message}");
-        }
-
-        // Parse ERPNext response
-        var result = ParseErpNextListResponse(response.Data, request);
-
-        // Cache with TTL 5 min for lists
-        if (!bypassCache)
-        {
-            await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromMinutes(5), cancellationToken);
+            result = await FetchListAsync(request, tenantId, cancellationToken);
         }
 
         // Audit
@@ -89,15 +96,95 @@ public sealed class QueryService
         var bypassCache = _httpContextAccessor.HttpContext?.Request.Headers.CacheControl.Contains("no-cache") == true;
         var cacheKey = $"query:{tenantId}:{doctype}:{name}";
 
+        JsonElement result;
         if (!bypassCache)
         {
-            JsonElement? cached = await _cacheService.GetAsync<JsonElement>(cacheKey, cancellationToken);
-            if (cached.HasValue)
-            {
-                return cached.GetValueOrDefault();
-            }
+            result = await _stampedeGuard.ExecuteAsync(
+                cacheKey,
+                async ct => await _cacheService.GetAsync<JsonElement>(cacheKey, ct),
+                async ct =>
+                {
+                    var created = await FetchDocumentAsync(doctype, name, ct);
+                    var ttl = TimeSpan.FromMinutes(1);
+                    await _cacheService.SetAsync(cacheKey, created, ttl, ct);
+                    await _cacheInvalidationService.RegisterQueryKeyAsync(tenantId, doctype, cacheKey, ttl, ct);
+                    return created;
+                },
+                cancellationToken);
+        }
+        else
+        {
+            result = await FetchDocumentAsync(doctype, name, cancellationToken);
         }
 
+        await WriteAuditAsync(tenantId, GetUserId(), "GET", $"/api/v1/query/{doctype}/{name}", 200, sw.ElapsedMilliseconds, cancellationToken);
+
+        return result;
+    }
+
+    public async Task<object> CountAsync(string doctype, CancellationToken cancellationToken)
+    {
+        var sw = Stopwatch.StartNew();
+        var tenantId = GetTenantId();
+        var cacheKey = $"query:{tenantId}:{doctype}:count";
+        var bypassCache = _httpContextAccessor.HttpContext?.Request.Headers.CacheControl.Contains("no-cache") == true;
+
+        object result;
+        if (!bypassCache)
+        {
+            result = await _stampedeGuard.ExecuteAsync(
+                cacheKey,
+                async ct => await _cacheService.GetAsync<object>(cacheKey, ct),
+                async ct =>
+                {
+                    var created = await FetchCountAsync(doctype, ct);
+                    var ttl = TimeSpan.FromMinutes(5);
+                    await _cacheService.SetAsync(cacheKey, created, ttl, ct);
+                    await _cacheInvalidationService.RegisterQueryKeyAsync(tenantId, doctype, cacheKey, ttl, ct);
+                    return created;
+                },
+                cancellationToken);
+        }
+        else
+        {
+            result = await FetchCountAsync(doctype, cancellationToken);
+        }
+
+        await WriteAuditAsync(tenantId, GetUserId(), "GET", $"/api/v1/query/{doctype}/count", 200, sw.ElapsedMilliseconds, cancellationToken);
+
+        return result;
+    }
+
+    public async Task PurgeCacheAsync(string doctype, CancellationToken cancellationToken)
+    {
+        var tenantId = GetTenantId();
+        await _cacheInvalidationService.InvalidateDoctypeAsync(doctype, tenantId, cancellationToken);
+        _logger.LogInformation("Purged query cache for doctype {Doctype} tenant {Tenant}", doctype, tenantId);
+    }
+
+    private async Task<PaginatedResponse<JsonElement>> FetchListAsync(
+        QueryRequest request,
+        string tenantId,
+        CancellationToken cancellationToken)
+    {
+        var limitStart = (request.Page - 1) * request.PageSize;
+        var resourcePath = BuildResourcePath(request, limitStart);
+
+        var response = await _erpNextClient.GetAsync<JsonElement>(resourcePath, tenantId, cancellationToken);
+
+        if (response.StatusCode != 200 || response.Data.ValueKind == JsonValueKind.Undefined)
+        {
+            throw new InvalidOperationException($"ERPNext query failed: {response.Message}");
+        }
+
+        return ParseErpNextListResponse(response.Data, request);
+    }
+
+    private async Task<JsonElement> FetchDocumentAsync(
+        string doctype,
+        string name,
+        CancellationToken cancellationToken)
+    {
         var response = await _erpNextClient.GetAsync<JsonElement>($"{doctype}/{name}", cancellationToken);
 
         if (response.StatusCode == 404)
@@ -110,30 +197,11 @@ public sealed class QueryService
             throw new InvalidOperationException($"ERPNext query failed: {response.Message}");
         }
 
-        // Cache with TTL 1 min for single docs
-        if (!bypassCache)
-        {
-            await _cacheService.SetAsync(cacheKey, response.Data, TimeSpan.FromMinutes(1), cancellationToken);
-        }
-
-        await WriteAuditAsync(tenantId, GetUserId(), "GET", $"/api/v1/query/{doctype}/{name}", 200, sw.ElapsedMilliseconds, cancellationToken);
-
         return response.Data;
     }
 
-    public async Task<object> CountAsync(string doctype, CancellationToken cancellationToken)
+    private async Task<object> FetchCountAsync(string doctype, CancellationToken cancellationToken)
     {
-        var sw = Stopwatch.StartNew();
-        var tenantId = GetTenantId();
-        var cacheKey = $"query:{tenantId}:{doctype}:count";
-        var bypassCache = _httpContextAccessor.HttpContext?.Request.Headers.CacheControl.Contains("no-cache") == true;
-
-        if (!bypassCache)
-        {
-            var cached = await _cacheService.GetAsync<object>(cacheKey, cancellationToken);
-            if (cached is not null) return cached;
-        }
-
         var response = await _erpNextClient.GetAsync<JsonElement>($"{doctype}?limit_page_length=1&fields=[\"count(*)\"]", cancellationToken);
 
         if (response.StatusCode != 200 || response.Data.ValueKind == JsonValueKind.Undefined)
@@ -152,28 +220,7 @@ public sealed class QueryService
             }
         }
 
-        var result = new { count };
-
-        if (!bypassCache)
-        {
-            await _cacheService.SetAsync(cacheKey, result, TimeSpan.FromMinutes(5), cancellationToken);
-        }
-
-        await WriteAuditAsync(tenantId, GetUserId(), "GET", $"/api/v1/query/{doctype}/count", 200, sw.ElapsedMilliseconds, cancellationToken);
-
-        return result;
-    }
-
-    public async Task PurgeCacheAsync(string doctype, CancellationToken cancellationToken)
-    {
-        var tenantId = GetTenantId();
-        // Purge by pattern — note: requires SCAN in production; simplified here
-        var patterns = new[] { $"query:{tenantId}:{doctype}:*", $"query:{tenantId}:{doctype}:count" };
-        foreach (var pattern in patterns)
-        {
-            await _cacheService.RemoveAsync(pattern, cancellationToken);
-        }
-        _logger.LogInformation("Purged query cache for doctype {Doctype} tenant {Tenant}", doctype, tenantId);
+        return new { count };
     }
 
     private static string BuildResourcePath(QueryRequest request, int limitStart)

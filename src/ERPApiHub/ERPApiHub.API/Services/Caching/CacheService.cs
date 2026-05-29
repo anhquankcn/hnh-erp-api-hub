@@ -129,6 +129,41 @@ public sealed class CacheService : ICacheService
         }
     }
 
+    public async Task<bool> TrySetAsync<T>(
+        string key,
+        T value,
+        TimeSpan? expiration = null,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!_cacheOptions.Enabled)
+        {
+            return false;
+        }
+
+        var ttl = expiration ?? _cacheOptions.DefaultTtl;
+        var serializedValue = JsonSerializer.Serialize(value, SerializerOptions);
+        var redisKey = BuildRedisKey(key);
+        var wasSet = await _database.StringSetAsync(redisKey, serializedValue, ttl, When.NotExists);
+
+        if (!wasSet)
+        {
+            return false;
+        }
+
+        var tags = NormalizeTags(InferTags(key));
+        SetL1(key, value, ttl < _cacheOptions.L1Ttl ? ttl : _cacheOptions.L1Ttl, tags);
+        await _database.SetAddAsync(BuildKeyIndexSet(), redisKey.ToString());
+
+        foreach (var tag in tags)
+        {
+            await _database.SetAddAsync(BuildTagKey(tag), redisKey.ToString());
+        }
+
+        return true;
+    }
+
     public async Task<T> GetOrCreateAsync<T>(
         string key,
         Func<CancellationToken, Task<T>> factory,
@@ -271,6 +306,14 @@ public sealed class CacheService : ICacheService
 
         await _database.KeyExpireAsync(BuildRedisKey(key), expiration);
         _memoryCache.Remove(key);
+    }
+
+    public async Task<bool> PingAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var latency = await _database.PingAsync();
+        return latency >= TimeSpan.Zero;
     }
 
     private void SetL1<T>(string key, T value, TimeSpan ttl, IReadOnlyCollection<string> tags)

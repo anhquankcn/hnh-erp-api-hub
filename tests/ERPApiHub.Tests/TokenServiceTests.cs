@@ -95,6 +95,93 @@ public sealed class TokenServiceTests
             CancellationToken.None), Times.Once);
     }
 
+    [Fact]
+    public async Task GenerateTokenAsync_ReturnsPlainTokenOnceAndCachesMetadataOnly()
+    {
+        ApiTokenRecord? cachedRecord = null;
+        _cache.Setup(x => x.SetAsync(
+                It.Is<string>(key => key.StartsWith("erphub:api-tokens:", StringComparison.Ordinal)),
+                It.IsAny<ApiTokenRecord>(),
+                It.IsAny<TimeSpan?>(),
+                CancellationToken.None))
+            .Callback<string, ApiTokenRecord, TimeSpan?, CancellationToken>((_, record, _, _) => cachedRecord = record)
+            .Returns(Task.CompletedTask);
+
+        _cache.Setup(x => x.GetAsync<List<string>>("erphub:api-tokens:index", CancellationToken.None))
+            .ReturnsAsync([]);
+
+        var service = CreateService();
+
+        var result = await service.GenerateTokenAsync(
+            new CreateApiTokenCommand("erpnext", "ERPNext", 30, ["read"]),
+            "tester",
+            CancellationToken.None);
+
+        Assert.StartsWith("erphub_", result.PlainToken, StringComparison.Ordinal);
+        Assert.Equal(result.Token.Id, cachedRecord?.Id);
+        Assert.DoesNotContain(
+            typeof(ApiTokenRecord).GetProperties(),
+            property => property.Name.Equals("PlainToken", StringComparison.Ordinal));
+
+        var cachedJson = JsonSerializer.Serialize(cachedRecord);
+        Assert.DoesNotContain(result.PlainToken, cachedJson, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ValidateTokenAsync_WhenTokenIsValid_ReturnsTokenMetadata()
+    {
+        var record = CreateApiTokenRecord("token-1", "shared-secret", ApiTokenStatuses.Active, DateTimeOffset.UtcNow.AddDays(1));
+        SetupTokenIndex(record);
+
+        var service = CreateService();
+
+        var result = await service.ValidateTokenAsync("shared-secret", CancellationToken.None);
+
+        Assert.True(result.IsValid);
+        Assert.Equal("token-1", result.TokenId);
+        Assert.Equal("erpnext", result.SystemId);
+        Assert.Equal(["read"], result.Permissions);
+        Assert.Null(result.Reason);
+    }
+
+    [Theory]
+    [InlineData(ApiTokenStatuses.Revoked, 1)]
+    [InlineData(ApiTokenStatuses.Active, -1)]
+    public async Task ValidateTokenAsync_WhenMatchingTokenCannotBeUsed_ReturnsUnifiedInvalidTokenReason(
+        string status,
+        int expiryDays)
+    {
+        var record = CreateApiTokenRecord("token-1", "shared-secret", status, DateTimeOffset.UtcNow.AddDays(expiryDays));
+        SetupTokenIndex(record);
+
+        var service = CreateService();
+
+        var result = await service.ValidateTokenAsync("shared-secret", CancellationToken.None);
+
+        Assert.False(result.IsValid);
+        Assert.Equal("Invalid token", result.Reason);
+        Assert.Null(result.TokenId);
+        Assert.Null(result.SystemId);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("missing-token")]
+    public async Task ValidateTokenAsync_WhenTokenIsMissingOrUnknown_ReturnsUnifiedInvalidTokenReason(string token)
+    {
+        _cache.Setup(x => x.GetAsync<List<string>>("erphub:api-tokens:index", CancellationToken.None))
+            .ReturnsAsync([]);
+
+        var service = CreateService();
+
+        var result = await service.ValidateTokenAsync(token, CancellationToken.None);
+
+        Assert.False(result.IsValid);
+        Assert.Equal("Invalid token", result.Reason);
+        Assert.Null(result.TokenId);
+        Assert.Null(result.SystemId);
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -203,6 +290,34 @@ public sealed class TokenServiceTests
 
     private static string Base64UrlEncode(byte[] bytes)
         => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static ApiTokenRecord CreateApiTokenRecord(
+        string id,
+        string plainToken,
+        string status,
+        DateTimeOffset expiresAt) => new()
+    {
+        Id = id,
+        SystemId = "erpnext",
+        Permissions = ["read"],
+        Status = status,
+        TokenHash = BCrypt.Net.BCrypt.HashPassword(plainToken, workFactor: 4),
+        CreatedAt = DateTimeOffset.UtcNow.AddDays(-1),
+        ExpiresAt = expiresAt,
+        CreatedBy = "tester"
+    };
+
+    private void SetupTokenIndex(params ApiTokenRecord[] records)
+    {
+        _cache.Setup(x => x.GetAsync<List<string>>("erphub:api-tokens:index", CancellationToken.None))
+            .ReturnsAsync(records.Select(record => record.Id).ToList());
+
+        foreach (var record in records)
+        {
+            _cache.Setup(x => x.GetAsync<ApiTokenRecord>($"erphub:api-tokens:{record.Id}", CancellationToken.None))
+                .ReturnsAsync(record);
+        }
+    }
 
     private sealed class StubHttpMessageHandler : HttpMessageHandler
     {

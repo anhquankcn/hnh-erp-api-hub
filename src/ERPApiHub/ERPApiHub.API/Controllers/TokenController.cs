@@ -52,7 +52,7 @@ public sealed class TokenController(
             GetActorId(),
             cancellationToken);
 
-        var response = MapToken(token, includePlainToken: true);
+        var response = MapIssuedToken(token);
         return Created($"/api/v2/tokens/{response.Id}", response);
     }
 
@@ -80,7 +80,7 @@ public sealed class TokenController(
         if (token is null)
             return TokenNotFound(id);
 
-        return Ok(MapToken(token, includePlainToken: true));
+        return Ok(MapIssuedToken(token));
     }
 
     /// <summary>
@@ -141,7 +141,7 @@ public sealed class TokenController(
         var result = await tokenService.ListTokensAsync(systemId, status, page, pageSize, cancellationToken);
         return Ok(new TokenListResponse
         {
-            Items = result.Items.Select(t => MapToken(t, includePlainToken: false)).ToList(),
+            Items = result.Items.Select(MapToken).ToList(),
             Total = result.Total,
             Page = result.Page,
             PageSize = result.PageSize,
@@ -167,7 +167,7 @@ public sealed class TokenController(
         if (token is null)
             return TokenNotFound(id);
 
-        return Ok(MapToken(token, includePlainToken: false));
+        return Ok(MapToken(token));
     }
 
     /// <summary>
@@ -188,7 +188,7 @@ public sealed class TokenController(
         if (string.IsNullOrWhiteSpace(request.Token))
         {
             return BadRequest(ProblemDetailsHelper.Validation(
-                "Token is required.",
+                "Invalid token",
                 HttpContext.Request.Path.ToString(),
                 HttpContext.TraceIdentifier));
         }
@@ -279,14 +279,20 @@ public sealed class TokenController(
         HttpContext.Connection.RemoteIpAddress?.ToString() ??
         "unknown";
 
-    private static TokenResponse MapToken(ApiTokenRecord token, bool includePlainToken) => new()
+    private static TokenResponse MapIssuedToken(ApiTokenIssueResult issuedToken)
+    {
+        var response = MapToken(issuedToken.Token);
+        return response with { Token = issuedToken.PlainToken };
+    }
+
+    private static TokenResponse MapToken(ApiTokenRecord token) => new()
     {
         Id = token.Id,
         SystemId = token.SystemId,
         Description = token.Description,
         Permissions = token.Permissions,
         Status = token.Status,
-        Token = includePlainToken ? token.PlainToken : null,
+        Token = null,
         CreatedAt = token.CreatedAt,
         ExpiresAt = token.ExpiresAt,
         RotatedAt = token.RotatedAt,

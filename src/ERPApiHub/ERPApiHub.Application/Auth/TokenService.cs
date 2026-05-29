@@ -12,6 +12,7 @@ public sealed class TokenService
 {
     private const string TokenPrefix = "erphub_";
     private const string TokenIndexKey = "erphub:api-tokens:index";
+    private const string InvalidTokenReason = "Invalid token";
     private static readonly TimeSpan TokenMetadataTtl = TimeSpan.FromDays(3700);
     private readonly HttpClient _httpClient;
     private readonly ICacheService _cache;
@@ -132,7 +133,7 @@ public sealed class TokenService
     public Task<bool> IsTokenBlacklistedAsync(string jti, CancellationToken cancellationToken = default)
         => _cache.ExistsAsync($"erphub:token-blacklist:{jti}", cancellationToken);
 
-    public async Task<ApiTokenRecord> GenerateTokenAsync(
+    public async Task<ApiTokenIssueResult> GenerateTokenAsync(
         CreateApiTokenCommand command,
         string createdBy,
         CancellationToken cancellationToken = default)
@@ -162,10 +163,10 @@ public sealed class TokenService
         await AddToIndexAsync(record.Id, cancellationToken);
 
         _logger.LogInformation("API token {TokenId} created for system {SystemId}", record.Id, record.SystemId);
-        return record;
+        return new ApiTokenIssueResult(record, plainToken);
     }
 
-    public async Task<ApiTokenRecord?> RotateTokenAsync(
+    public async Task<ApiTokenIssueResult?> RotateTokenAsync(
         string id,
         string rotatedBy,
         CancellationToken cancellationToken = default)
@@ -192,7 +193,7 @@ public sealed class TokenService
         await StoreTokenAsync(rotated, cancellationToken);
 
         _logger.LogInformation("API token {TokenId} rotated", id);
-        return rotated;
+        return new ApiTokenIssueResult(rotated, plainToken);
     }
 
     public async Task<bool> RevokeTokenAsync(
@@ -270,32 +271,37 @@ public sealed class TokenService
     public async Task<ApiTokenValidationResult> ValidateTokenAsync(string token, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(token))
-            return ApiTokenValidationResult.Invalid("Token is required.");
+            return ApiTokenValidationResult.Invalid(InvalidTokenReason);
 
-        // Get all active tokens and verify against each (constant-time for security)
+        var normalizedToken = token.Trim();
+        ApiTokenRecord? matchedRecord = null;
         var ids = await _cache.GetAsync<List<string>>(TokenIndexKey, cancellationToken) ?? [];
         foreach (var id in ids)
         {
             var record = await GetTokenAsync(id, cancellationToken);
-            if (record is null || !record.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase))
+            if (record is null || string.IsNullOrWhiteSpace(record.TokenHash))
                 continue;
 
-            if (BCrypt.Net.BCrypt.Verify(token.Trim(), record.TokenHash))
+            if (VerifyTokenHash(normalizedToken, record.TokenHash))
             {
-                if (record.ExpiresAt <= DateTimeOffset.UtcNow)
-                    return ApiTokenValidationResult.Invalid("Token has expired.", record.Id, record.SystemId);
-
-                return new ApiTokenValidationResult(
-                    true,
-                    record.Id,
-                    record.SystemId,
-                    record.Permissions,
-                    record.ExpiresAt,
-                    null);
+                matchedRecord = record;
             }
         }
 
-        return ApiTokenValidationResult.Invalid("Token was not found or has been revoked.");
+        if (matchedRecord is not null &&
+            matchedRecord.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase) &&
+            matchedRecord.ExpiresAt > DateTimeOffset.UtcNow)
+        {
+            return new ApiTokenValidationResult(
+                true,
+                matchedRecord.Id,
+                matchedRecord.SystemId,
+                matchedRecord.Permissions,
+                matchedRecord.ExpiresAt,
+                null);
+        }
+
+        return ApiTokenValidationResult.Invalid(InvalidTokenReason);
     }
 
     /// <summary>
@@ -361,6 +367,18 @@ public sealed class TokenService
         return BCrypt.Net.BCrypt.HashPassword(token, workFactor: 12);
     }
 
+    private static bool VerifyTokenHash(string token, string tokenHash)
+    {
+        try
+        {
+            return BCrypt.Net.BCrypt.Verify(token, tokenHash);
+        }
+        catch (BCrypt.Net.SaltParseException)
+        {
+            return false;
+        }
+    }
+
     private static string Base64UrlEncode(ReadOnlySpan<byte> bytes) =>
         Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
@@ -390,6 +408,8 @@ public sealed record CreateApiTokenCommand(
     string? Description,
     int ExpiryDays,
     IReadOnlyList<string> Permissions);
+
+public sealed record ApiTokenIssueResult(ApiTokenRecord Token, string PlainToken);
 
 public sealed record ApiTokenRecord
 {
