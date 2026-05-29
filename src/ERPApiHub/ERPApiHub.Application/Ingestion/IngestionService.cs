@@ -454,7 +454,7 @@ public sealed class IngestionService : IIngestionService
         var existingInvoice = await _erpNextClient.GetAsync<JsonElement>(
             $"{SalesInvoiceDoctype}/{Uri.EscapeDataString(name)}",
             cancellationToken);
-        if (!existingInvoice.IsSuccessStatusCode || existingInvoice.Data is null)
+        if (!existingInvoice.IsSuccessStatusCode || existingInvoice.Data.ValueKind == JsonValueKind.Undefined)
         {
             await AuditAsync(
                 tenantId,
