@@ -2,6 +2,28 @@
 
 ERP API Hub is a .NET 9 integration service for ERPNext-facing ingestion, query, webhook, audit, compliance, and operational APIs.
 
+## Sprint 6 Completion: Operations & Compliance
+
+Sprint 6 is complete: **Operations & Compliance** delivered across 6 stories. The release includes background jobs, audit search/export, token lifecycle, and field validation with security hardening.
+
+### S6 Features
+
+| Story | Feature | Summary |
+|-------|---------|---------|
+| S6-001 | Polling Fallback Worker | Background polling with internal pagination + guard cursor to prevent data loss when >100 records share timestamp. |
+| S6-002 | PDPA REST Endpoints | Durable DB persistence for consent and erasure requests with composite keys and real timestamps. |
+| S6-003 | Token Lifecycle Management | BCrypt hashing for tokens, plaintext token removal from cache, secure token rotation and revocation. |
+| S6-004 | Tenant Health Check Background Job | Parallel health checks with `MaxDegreeOfParallelism=5`, alert deduplication, correlation IDs, and safe error messages. |
+| S6-005 | Audit Search & Export API | CSV export with escaping (prevent injection), export limits (`MaxExportRecords=100k`), and thread-safe stats collection. |
+| S6-006 | Link-Field Validation | Doctype whitelist regex (`^[A-Za-z][A-Za-z0-9_]*$`), defense-in-depth checks, and generic error messages (prevent info leak). |
+
+### Sprint 6 Security Fixes
+
+- **S6-003**: Replaced SHA256 with BCrypt for token hashing (prevents brute force)
+- **S6-005**: Fixed CSV injection vulnerability in audit export (escapes `=`, `+`, `-`, `@`, tabs, newlines)
+- **S6-006**: Added doctype whitelist validation to prevent path traversal / injection
+- **S6-004**: Added correlation IDs to health alerts for traceability; safe error messages (no tenant info leak)
+
 ## Sprint 5 Completion: Production Hardening & Compliance
 
 Sprint 5 is complete: **Production Hardening & Compliance** delivered **52 story points across 7 stories**. The release is cross-referenced in [PR #2](https://github.com/anhquankcn/hnh-erp-api-hub/pull/2).
@@ -66,3 +88,14 @@ The API exposes versioned routes under `/api/v1` and `/api/v2`.
 - Successful `/api/v1` responses include `Sunset: Sat, 31 Dec 2026 00:00:00 GMT` and `Deprecation: true`.
 
 Use `/api/v2` for new health integrations and keep existing `/api/v1` clients on a migration plan before the sunset date.
+
+## Sprint History
+
+| Sprint | Theme | Stories | Status |
+|--------|-------|---------|--------|
+| Sprint 6 | Operations & Compliance | 6 | ✅ Complete |
+| Sprint 5 | Production Hardening | 7 | ✅ Complete |
+| Sprint 4 | Caching & Performance | - | ✅ Complete |
+| Sprint 3 | Core API & Integration | - | ✅ Complete |
+| Sprint 2 | Authentication & Security | - | ✅ Complete |
+| Sprint 1 | Bootstrap & Foundation | - | ✅ Complete |
