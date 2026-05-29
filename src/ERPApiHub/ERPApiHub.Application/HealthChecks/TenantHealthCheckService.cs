@@ -46,51 +46,68 @@ public sealed class TenantHealthCheckService
 
     public async Task CheckAllTenantsHealthAsync(CancellationToken ct)
     {
-        var tenants = await _repository.ListTenantRegistriesAsync(ct);
-        var activeTenants = tenants.Where(tenant => tenant.IsActive).ToArray();
+        var tenants = await _repository.ListTenantRegistriesAsync(onlyActive: true, ct);
+        var activeTenants = tenants.ToArray();
 
         var healthyCount = 0;
         var degradedCount = 0;
         var unhealthyCount = 0;
 
-        foreach (var tenant in activeTenants)
+        var parallelOptions = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = Math.Max(1, _options.MaxDegreeOfParallelism),
+            CancellationToken = ct
+        };
+
+        await Parallel.ForEachAsync(activeTenants, parallelOptions, async (tenant, innerCt) =>
         {
             var previousStatus = tenant.HealthStatus;
             TenantHealthResult result;
 
             try
             {
-                result = await CheckTenantHealthAsync(tenant, ct);
+                result = await CheckTenantHealthAsync(tenant, innerCt);
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            catch (OperationCanceledException) when (innerCt.IsCancellationRequested)
             {
                 throw;
             }
             catch (Exception ex)
             {
-                unhealthyCount++;
+                Interlocked.Increment(ref unhealthyCount);
                 _logger.LogError(ex, "Tenant {TenantId} health check could not be completed.", tenant.TenantId);
-                continue;
+                return;
             }
 
             switch (result.Status)
             {
                 case TenantHealthStatuses.Healthy:
-                    healthyCount++;
+                    Interlocked.Increment(ref healthyCount);
                     break;
                 case TenantHealthStatuses.Degraded:
-                    degradedCount++;
+                    Interlocked.Increment(ref degradedCount);
                     break;
                 default:
-                    unhealthyCount++;
+                    Interlocked.Increment(ref unhealthyCount);
                     break;
             }
 
-            if (ShouldPublishAlert(result.Status))
+            if (ShouldPublishAlert(result.Status) && result.Status != previousStatus)
             {
-                await PublishAlertAsync(result, previousStatus, ct);
+                try
+                {
+                    await PublishAlertAsync(result, previousStatus, innerCt);
+                }
+                catch (OperationCanceledException) when (innerCt.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to publish health alert for tenant {TenantId}. Continuing.", tenant.TenantId);
+                }
             }
-        }
+        });
 
         _logger.LogInformation(
             "Tenant health check completed. Total={TotalCount}, Healthy={HealthyCount}, Degraded={DegradedCount}, Unhealthy={UnhealthyCount}",
@@ -187,7 +204,7 @@ public sealed class TenantHealthCheckService
                 TenantId = tenant.TenantId,
                 Status = TenantHealthStatuses.Unhealthy,
                 ResponseTime = stopwatch.Elapsed,
-                ErrorMessage = ex.Message,
+                ErrorMessage = "Health check failed.",
                 CheckedAt = checkedAt
             };
 
@@ -240,7 +257,7 @@ public sealed class TenantHealthCheckService
             ResponseTime = result.ResponseTime,
             ErrorMessage = result.ErrorMessage,
             AlertedAt = DateTimeOffset.UtcNow,
-            CorrelationId = result.TenantId
+            CorrelationId = UlidGenerator.Generate()
         };
 
         await _messageBus.PublishAsync(ExchangeName, RoutingKey, alert, ct);

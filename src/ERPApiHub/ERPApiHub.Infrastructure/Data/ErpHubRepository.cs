@@ -73,6 +73,12 @@ public sealed class ErpHubRepository(ErpHubDbContext dbContext) : IErpHubReposit
     public async Task<IReadOnlyList<TenantRegistry>> ListTenantRegistriesAsync(CancellationToken cancellationToken = default) =>
         await dbContext.TenantRegistries.OrderBy(x => x.SiteName).ToListAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<TenantRegistry>> ListTenantRegistriesAsync(bool onlyActive, CancellationToken cancellationToken = default) =>
+        await dbContext.TenantRegistries
+            .Where(x => !onlyActive || x.IsActive)
+            .OrderBy(x => x.SiteName)
+            .ToListAsync(cancellationToken);
+
     public async Task<ApiKeyMapping?> GetApiKeyMappingAsync(string systemId, CancellationToken cancellationToken = default) =>
         await dbContext.ApiKeyMappings.FirstOrDefaultAsync(x => x.SystemId == systemId && x.IsActive, cancellationToken);
 
