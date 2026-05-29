@@ -44,12 +44,14 @@
 - **Note**: These are pre-existing API mismatches, not introduced by Sprint 6
 
 ## Fixed in Sprint 6
-- [x] S6-004: Tenant Health Check Background Job
-- [x] S6-005: Audit Search & Export API
-- [x] S6-006: Link-Field Validation
+- [x] S6-001: Polling Fallback Worker ✅ FIXED
+- [x] S6-002: PDPA REST Endpoints ✅ FIXED (removed duplicate ConsentRecord)
+- [x] S6-003: Token Lifecycle Management ✅ FIXED (removed PlainToken references)
+- [x] S6-004: Tenant Health Check Background Job ✅ FIXED
+- [x] S6-005: Audit Search & Export API ✅ FIXED
+- [x] S6-006: Link-Field Validation ✅ FIXED
+- [x] Pre-existing: CreateAuditLogAsync + JsonElement null ✅ FIXED
 
-## Next Actions
-1. Fix S6-002 compile errors (PdpaService.cs local class conflict)
-2. Fix S6-003 compile errors (ApiTokenRecord.PlainToken)
-3. Fix pre-existing `CreateAuditLogAsync` and `JsonElement` null errors
-4. Continue with S6-003 remaining WARNs (timing attack, rate limit)
+## Remaining for Sprint 7
+1. **S6-003 WARN: Timing Attack** — Unified error message for token validation
+2. **S6-003 WARN: Rate Limit Race Condition** — Atomic INCR+EXPIRE
