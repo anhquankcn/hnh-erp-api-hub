@@ -1,6 +1,87 @@
-# Sprint 6 Tech Debt
+# Sprint 7 Tech Debt
 
-## Known Issues
+## Sprint 7 — COMPLETE ✅ (2026-05-29)
+
+All Sprint 7 stories implemented, reviewed, and merged to `main`.
+
+### S7 Stories Completed
+
+| Story | Feature | Points | Status |
+|-------|---------|--------|--------|
+| S7-001 | Webhook Dispatcher + Management API | 13 | ✅ Done |
+| S7-002 | Frappe Event Ingestion | 8 | ✅ Done |
+| S7-003 | Atomic Rate Limiting | 8 | ✅ Done |
+| S7-004 | Token Security Fix | 5 | ✅ Done |
+| S7-005 | Query Cache Invalidation | 8 | ✅ Done |
+| **TOTAL** | | **42 SP** | |
+
+### S7 Security Fixes Delivered
+
+- [x] S7-001: SSRF protection (private IP block, HTTPS required, redirect validation)
+- [x] S7-001: Delivery dedup via Redis `(eventId, subscriptionId)` TTL 24h
+- [x] S7-001: HMAC signature with timestamp + delivery_id
+- [x] S7-002: HMAC validation + timestamp anti-replay + IP restriction
+- [x] S7-003: Redis Lua sliding window (ZADD + ZREMRANGEBYSCORE + ZCARD)
+- [x] S7-003: EVALSHA with NOSCRIPT fallback
+- [x] S7-003: Per-tier limits (TIER_1 10K/min, TIER_2 1K/min, TIER_3 100/min)
+- [x] S7-003: Token bucket burst algorithm (Lua)
+- [x] S7-003: Rate limit by Client IP for unauthenticated requests
+- [x] S7-004: Anti-timing attack (unified "Invalid token" message)
+- [x] S7-004: O(N) token scan → O(1) SHA-256 Redis hash lookup
+- [x] S7-004: Token bucket burst algorithm
+- [x] S7-005: Cache stampede prevention (KeyedSemaphore)
+- [x] S7-005: Tag-based cache invalidation
+- [x] S7-005: CacheInvalidationWorker consuming webhook events
+
+### Gemini Review BLOCKERs (Fixed in `b5aa280`)
+
+| BLOCKER | File | Issue | Fix |
+|---------|------|-------|-----|
+| 1 | `TokenService.cs:86` | `ValidateSignature` stub (always true) | RS256 JWKS + HS256 secret |
+| 2 | `TokenService.cs:256` | O(N) linear scan + BCrypt each | SHA-256 Redis hash lookup |
+| 3 | `RateLimitMiddleware.cs:46` | Unauthenticated bypass rate limit | Rate-limit by Client IP |
+| 4 | `RedisRateLimiter.cs:100` | `CheckBurstAsync` stub (always true) | Token bucket Lua script |
+
+## Remaining Known Issues (Post-Sprint 7)
+
+### WARN: Redis `SCAN` in CacheInvalidationService
+- **File**: `CacheInvalidationService.cs:115`
+- **Issue**: `server.KeysAsync` maps to Redis `SCAN` — slow on large datasets
+- **Fix**: Prefer tag-based O(1) invalidation; monitor Redis latency
+- **Priority**: Low (tag-based already primary path)
+
+### WARN: Task.Delay in WebhookDispatcherService retry loop
+- **File**: `WebhookDispatcherService.cs:150`
+- **Issue**: In-memory delay blocks worker from processing other events
+- **Fix**: Offload retries to RabbitMQ delayed queue
+- **Priority**: Medium (deferred to Sprint 8)
+
+### WARN: WebhookDelivery payload storage per attempt
+- **File**: `WebhookDispatcherService.cs:101`
+- **Issue**: Payload stored in DB for every attempt → rapid growth
+- **Fix**: Store payload once, reference by ID; or TTL-based storage
+- **Priority**: Medium (deferred to Sprint 8)
+
+### WARN: TokenService `aud`/`iss` validation
+- **File**: `TokenService.cs:72`
+- **Issue**: Missing `aud` (audience) and `iss` (issuer) claim checks
+- **Fix**: Add checks per FR-AUTH-001
+- **Priority**: Medium (deferred to Sprint 8)
+
+## Deferred to Sprint 8
+
+| Feature | Reason |
+|---------|--------|
+| Full-text search | Requires read model + sync/tenant partitioning |
+| Cross-doctype joins | Requires read model architecture |
+| Webhook retry via RabbitMQ delayed queue | Complex queue configuration |
+| Webhook payload dedup storage | DB schema change needed |
+
+---
+
+# Sprint 6 Tech Debt (Historical)
+
+[Remaining Sprint 6 content below...]
 
 ### S6-003: Token Lifecycle Management
 

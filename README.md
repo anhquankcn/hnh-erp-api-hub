@@ -2,6 +2,29 @@
 
 ERP API Hub is a .NET 9 integration service for ERPNext-facing ingestion, query, webhook, audit, compliance, and operational APIs.
 
+## Sprint 7 Completion: Webhooks, Rate Limiting & Security
+
+Sprint 7 is complete: **Webhook Infrastructure, Atomic Rate Limiting, and Token Security** delivered across **5 stories (42 story points)**.
+
+### S7 Features
+
+| Story | Feature | Summary |
+|-------|---------|---------|
+| S7-001 | Webhook Dispatcher + Management API | HMAC signature, SSRF protection, delivery dedup (Redis TTL 24h), DLQ, retry policy (5s → 15min → 30min). Management endpoints for CRUD webhook subscriptions. |
+| S7-002 | Frappe Event Ingestion | Secure `/internal/v1/events/ingest` with HMAC validation, timestamp anti-replay, IP restriction. Mock ERPNext Event Generator for testing. |
+| S7-003 | Atomic Rate Limiting | Redis Lua sliding window (ZADD + ZREMRANGEBYSCORE + ZCARD), EVALSHA with NOSCRIPT fallback, per-tier limits (TIER_1 10K/min, TIER_2 1K/min, TIER_3 100/min), per-endpoint percentages, Kong config generator. |
+| S7-004 | Token Security Fix | Unified error message for all token failures (anti-timing attack), PlainToken cleanup from entity + Redis, constant-time comparison via BCrypt. |
+| S7-005 | Query Cache Invalidation | Cache stampede prevention (KeyedSemaphore), tag-based cache invalidation, background worker consuming webhook events, Redis failure fail-open. |
+
+### S7 Security Fixes
+
+- **S7-001**: SSRF protection — blocks private IPs, requires HTTPS, validates redirects
+- **S7-001**: Delivery dedup prevents duplicate webhook delivery for same event
+- **S7-002**: HMAC + timestamp prevents replay attacks on event ingestion
+- **S7-003**: Redis Lua scripts ensure atomic rate limit counters (no race conditions)
+- **S7-004**: Anti-timing attack — all token validation failures return same error message
+- **S7-004**: O(N) token scan eliminated — SHA-256 Redis hash enables O(1) lookup
+
 ## Sprint 6 Completion: Operations & Compliance
 
 Sprint 6 is complete: **Operations & Compliance** delivered across 6 stories. The release includes background jobs, audit search/export, token lifecycle, and field validation with security hardening.
