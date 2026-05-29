@@ -52,6 +52,30 @@
 - [x] S6-006: Link-Field Validation ✅ FIXED
 - [x] Pre-existing: CreateAuditLogAsync + JsonElement null ✅ FIXED
 
-## Remaining for Sprint 7
-1. **S6-003 WARN: Timing Attack** — Unified error message for token validation
-2. **S6-003 WARN: Rate Limit Race Condition** — Atomic INCR+EXPIRE
+## Planned for Sprint 7 (2026-06-12)
+
+### S7-004: Token Timing Attack Fix
+- **Status:** In Progress (Sprint 7)
+- **Scope:** Unified "Invalid token" message + constant-time comparison
+- **Story:** S7-004
+
+### S7-003: Rate Limiting Hardening
+- **Status:** In Progress (Sprint 7)
+- **Scope:** Redis Lua script (EVALSHA + NOSCRIPT fallback), sliding window, per-tier limits
+- **Story:** S7-003
+
+### S7-001: Webhook Dispatcher + Management API
+- **Status:** Planned (Sprint 7)
+- **Scope:** Delivery, retry, DLQ, HMAC signature, SSRF protection, delivery dedup, CRUD API
+- **Story:** S7-001
+
+### S7-002: Frappe Server Script Integration
+- **Status:** Planned (Sprint 7)
+- **Scope:** `/internal/v1/events/ingest`, HMAC + IP restriction, mock event generator
+- **Story:** S7-002
+
+### S7-005: Query Cache Invalidation
+- **Status:** Planned (Sprint 7)
+- **Scope:** Cache invalidation on webhook events, stampede prevention
+- **Story:** S7-005
+- **Deferred to Sprint 8:** Full-text search, cross-doctype joins, read model
