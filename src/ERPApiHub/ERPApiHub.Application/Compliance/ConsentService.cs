@@ -93,12 +93,10 @@ public sealed class ConsentService
             TenantId = tenantId,
             DataSubjectId = dataSubjectId,
             Purpose = purpose,
-            Status = "withdrawn",
             GrantedAt = DateTimeOffset.UtcNow.AddYears(-1), // placeholder
             WithdrawnAt = DateTimeOffset.UtcNow,
-            WithdrawnReason = reason,
-            IpAddress = GetClientIp(),
-            UserAgent = GetUserAgent(),
+            IsActive = false,
+            Notes = reason,
         };
 
         var cacheKey = $"consent:{tenantId}:{dataSubjectId}:{purpose}";
@@ -227,12 +225,6 @@ public sealed class ConsentService
     }
 
     // ─── Helpers ──────────────────────────────────────────
-
-    private string? GetClientIp() =>
-        _httpContextAccessor?.HttpContext?.Connection.RemoteIpAddress?.ToString();
-
-    private string? GetUserAgent() =>
-        _httpContextAccessor?.HttpContext?.Request.Headers.UserAgent.ToString();
 
     private static string MaskTenantId(string tenantId) =>
         tenantId.Length > 4 ? $"{tenantId[..2]}***{tenantId[^2..]}" : "***";

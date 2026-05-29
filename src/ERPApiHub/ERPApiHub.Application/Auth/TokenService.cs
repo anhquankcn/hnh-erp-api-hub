@@ -155,8 +155,7 @@ public sealed class TokenService
             TokenHash = HashToken(plainToken),
             CreatedAt = now,
             ExpiresAt = now.AddDays(command.ExpiryDays),
-            CreatedBy = createdBy,
-            PlainToken = plainToken
+            CreatedBy = createdBy
         };
 
         await StoreTokenAsync(record, cancellationToken);
@@ -187,8 +186,7 @@ public sealed class TokenService
             RevokedAt = null,
             RevokedBy = null,
             UpdatedAt = now,
-            UpdatedBy = rotatedBy,
-            PlainToken = plainToken
+            UpdatedBy = rotatedBy
         };
 
         await StoreTokenAsync(rotated, cancellationToken);
@@ -215,8 +213,7 @@ public sealed class TokenService
             RevokedAt = now,
             RevokedBy = revokedBy,
             UpdatedAt = now,
-            UpdatedBy = revokedBy,
-            PlainToken = null
+            UpdatedBy = revokedBy
         };
 
         await StoreTokenAsync(revoked, cancellationToken);
@@ -319,7 +316,7 @@ public sealed class TokenService
 
     private async Task StoreTokenAsync(ApiTokenRecord token, CancellationToken cancellationToken)
     {
-        await _cache.SetAsync(TokenKey(token.Id), token with { PlainToken = null }, TokenMetadataTtl, cancellationToken);
+        await _cache.SetAsync(TokenKey(token.Id), token, TokenMetadataTtl, cancellationToken);
 
         if (token.Status.Equals(ApiTokenStatuses.Active, StringComparison.OrdinalIgnoreCase))
         {
@@ -349,7 +346,7 @@ public sealed class TokenService
             return token with { Status = ApiTokenStatuses.Expired };
         }
 
-        return token with { PlainToken = null };
+        return token;
     }
 
     private static string GeneratePlainToken()
