@@ -25,14 +25,15 @@ Enhance audit log search with advanced filtering capabilities. Current implement
   - `actionType` (enum: Create, Update, Delete, Query, Export, Login, etc.)
   - `status` (Success, Failure, Warning)
   - `dateFrom`, `dateTo` (ISO 8601 range)
-  - `message` (full-text search, LIKE pattern)
+  - `message` (full-text search, `LIKE '%keyword%'` or `tsvector`, NOT raw ILIKE)
   - `correlationId` (exact match)
 - [ ] Composite filters: multiple conditions combined with AND logic
 - [ ] Pagination: limit/offset with total count
 - [ ] Sorting: by timestamp (default desc), actionType, status
 - [ ] Response: paginated list with metadata (total, page, pageSize)
-- [ ] Index: PostgreSQL GIN index on `message` + composite index on `(tenantId, timestamp)`
-- [ ] Performance: p95 < 200ms for 1M records
+- [ ] Index: PostgreSQL `pg_trgm` GIN index on `message` + composite index on `(tenantId, timestamp)`
+- [ ] Performance: p95 < 500ms for 1M records (GIN-indexed LIKE; realistic without tsvector)
+- [ ] Graceful degradation: if no search term, return paginated list sorted by time
 
 **Technical Notes:**
 - Reuse `AuditSearchService` from S6-005
@@ -53,12 +54,13 @@ Replace in-memory `Task.Delay` retry in `WebhookDispatcherService` with RabbitMQ
 **Acceptance Criteria:**
 - [ ] Configure RabbitMQ `x-delayed-message` exchange (or use TTL + dead-letter)
 - [ ] `WebhookDispatcherService` publishes failed deliveries to delayed queue with:
-  - `x-delay` header: 5min (attempt 1), 15min (attempt 2)
-  - Delivery attempt counter (max 3)
+  - Delay: 0s (immediate), 5min (attempt 1), 15min (attempt 2)
+  - Delivery attempt counter (max 3 total)
 - [ ] `WebhookRetryConsumer` processes delayed messages:
   - Re-dispatch to original subscription
   - Increment attempt counter
-  - After 3 failures: mark subscription `failed`, alert admin
+  - After 3 failures: mark subscription `failed`, log to `webhook_dlq` table
+  - Alert admin via structured log (`alert: webhook_max_retry_exceeded`)
 - [ ] Remove `Task.Delay` from `WebhookDispatcherService`
 - [ ] Retry timing survives API restart (messages persist in queue)
 - [ ] Monitor: queue depth, retry latency, failure rate
@@ -68,6 +70,7 @@ Replace in-memory `Task.Delay` retry in `WebhookDispatcherService` with RabbitMQ
 - If plugin unavailable, use per-attempt queue with TTL (5min-queue, 15min-queue)
 - Update `RabbitMqMessageBus` to support delayed publish
 - Consider idempotency: retry must not duplicate if original succeeded
+- Define "alert admin": structured log event for log aggregation (Grafana/Splunk) to pick up
 
 ---
 
@@ -88,11 +91,13 @@ Replace `ValidateSignature` stub with real JWKS (JSON Web Key Set) validation fo
 - [ ] Validate `iss` claim matches Keycloak realm URL
 - [ ] Support key rotation (auto-refresh JWKS on `kid` mismatch)
 - [ ] HS256: continue using configured secret (backward compatible)
+- [ ] Graceful degradation: if JWKS endpoint unreachable (Keycloak down), validate using cached keys (Redis TTL 24h). If cache miss + unreachable → return 503 Service Unavailable with `retry_after: 300`
 
 **Technical Notes:**
 - Use `System.IdentityModel.Tokens.Jwt` or manual `RSA` + `JsonWebKey`
 - Keycloak JWKS endpoint: `http://localhost:8080/realms/HNHTravel-SGN/protocol/openid-connect/certs`
 - Cache invalidation on key rotation event
+- JWKS unreachable behavior: return 503, log `jwks_unavailable`, do NOT fail-open (security)
 
 ---
 
@@ -125,6 +130,7 @@ Implement metrics collection and Grafana dashboard for production monitoring. Ex
   - Webhook failure rate > 20% for 15min
   - Redis down for > 1min
   - Queue depth > 1000 for 10min
+- [ ] **Infrastructure assumption:** Prometheus + Grafana already deployed (HNH DevOps). API Hub only exports `/metrics`
 
 **Technical Notes:**
 - Use `prometheus-net` package (already referenced)
@@ -149,15 +155,16 @@ Generate OpenAPI 3.0 spec from existing controllers and produce client SDKs for 
   - Error response schemas
   - Example requests/responses
 - [ ] SDK Generation:
-  - TypeScript/Node.js client
-  - Python client
-  - Postman collection export
+  - TypeScript/Node.js client (auto-generated from OpenAPI spec)
+  - Python client (auto-generated from OpenAPI spec)
+  - Postman collection export (auto-generated from OpenAPI spec)
 - [ ] Developer Portal: static HTML page with:
   - API overview
   - Authentication guide
   - Rate limiting explanation
   - Webhook integration guide
   - Changelog
+- [ ] **Scope limit:** If time runs out, drop Developer Portal (keep SDKs + Postman)
 
 **Technical Notes:**
 - Use `Swashbuckle.AspNetCore` (already in project)
